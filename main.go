@@ -3,13 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/lightningnetwork/lnd/signal"
 	"os"
 
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btclog"
 	"github.com/lightningnetwork/lnd/build"
+	"github.com/lightningnetwork/lnd/signal"
 	"github.com/spf13/cobra"
 )
 
@@ -20,7 +20,7 @@ const (
 
 var (
 	logWriter = build.NewRotatingLogWriter()
-	log       = build.NewSubLogger("CFDN", genSubLogger(logWriter))
+	log       = build.NewSubLogger("BLDN", genSubLogger(logWriter))
 )
 
 type mainCommand struct {
@@ -41,9 +41,9 @@ func main() {
 		},
 	}
 	cc.cmd = &cobra.Command{
-		Use: "cfilter-cdn",
-		Short: "cfilter-cdn creates static files for serving compact " +
-			"filters over HTTP",
+		Use: "block-dn",
+		Short: "block-dn creates static files for serving compact " +
+			"filters and blocks over HTTP",
 		Long:    ``,
 		Version: fmt.Sprintf("v%s, commit %s", version, Commit),
 		Run: func(cmd *cobra.Command, args []string) {
@@ -57,7 +57,7 @@ func main() {
 			}
 
 			setupLogging()
-			log.Infof("cfilter-cdn version v%s commit %s", version,
+			log.Infof("block-dn version v%s commit %s", version,
 				Commit)
 
 			client, err := rpcclient.New(cc.bitcoindConfig, nil)
@@ -80,22 +80,31 @@ func main() {
 				return
 			}
 
+			errChan := make(chan error, 1)
+
 			go func() {
 				select {
 				case <-interceptor.ShutdownChannel():
 					log.Infof("Received shutdown signal")
 					cancel()
+
+				case err := <-errChan:
+					log.Errorf("Error: %v", err)
+					cancel()
 				}
 			}()
 
-			err = UpdateFilterFiles(
-				ctx, cc.baseDir, client, chainParams,
-			)
-			if err != nil {
-				log.Errorf("Error updating filter files: %v",
-					err)
-				return
-			}
+			go func() {
+				err = UpdateFilterFiles(
+					ctx, cc.baseDir, client, chainParams,
+				)
+				if err != nil {
+					errChan <- fmt.Errorf("error "+
+						"updating filter files: %v",
+						err)
+					return
+				}
+			}()
 		},
 		DisableAutoGenTag: true,
 	}
@@ -132,8 +141,8 @@ func main() {
 }
 
 func setupLogging() {
-	setSubLogger("CFDN", log)
-	err := logWriter.InitLogRotator("./cfilter-cdn.log", 10, 3)
+	setSubLogger("BLDN", log)
+	err := logWriter.InitLogRotator("./block-dn.log", 10, 3)
 	if err != nil {
 		panic(err)
 	}

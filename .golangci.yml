@@ -58,9 +58,3 @@ linters:
     - deadcode
     - structcheck
     - varcheck
-
-issues:
-  exclude-rules:
-    - path: cmd/chantools
-      linters:
-        - lll

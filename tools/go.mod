@@ -1,9 +1,9 @@
-module github.com/guggero/cfilter-cdn/tools
+module github.com/guggero/block-dn/tools
 
 go 1.18
 
 require (
-	github.com/btcsuite/btcd v0.23.5
+	github.com/btcsuite/btcd v0.23.4
 	github.com/golangci/golangci-lint v1.51.2
 	github.com/ory/go-acc v0.2.8
 	github.com/rinchsan/gosimports v0.1.5

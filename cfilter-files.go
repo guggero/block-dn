@@ -21,12 +21,10 @@ const (
 
 	HeaderFileDir = "headers"
 	FilterFileDir = "filters"
-	BlocksFileDir = "blocks/%07d-%07d"
 
 	HeaderFileNamePattern       = "%s/block-%07d-%07d.header"
 	FilterFileNamePattern       = "%s/block-%07d-%07d.filter"
 	FilterHeaderFileNamePattern = "%s/block-%07d-%07d.header"
-	BlocksFileNamePattern       = "%s/%s.block"
 	StatusFileName              = "status.json"
 
 	DirectoryMode = 0755
@@ -125,15 +123,6 @@ func UpdateFilterFiles(ctx context.Context, baseDir string,
 		filters[*hash] = filterBytes
 		filterHeaders[*hash] = filterHeader
 
-		err = writeBlock(baseDir, hash, i, client)
-		if err != nil {
-			return fmt.Errorf("error writing block: %w", err)
-		}
-
-		if i > 0 && i%1000 == 0 {
-			log.Debugf("Processed %d blocks", i)
-		}
-
 		if i%FiltersPerFile == FiltersPerFile-1 {
 			fileStart := i - FiltersPerFile + 1
 			filterFileName := fmt.Sprintf(
@@ -192,53 +181,6 @@ func UpdateFilterFiles(ctx context.Context, baseDir string,
 					"%w", err)
 			}
 		}
-	}
-
-	return nil
-}
-
-func currentBlockDir(i int32) string {
-	div := i / FiltersPerFile
-	return fmt.Sprintf(
-		BlocksFileDir, div*FiltersPerFile, (div+1)*FiltersPerFile-1,
-	)
-}
-
-func writeBlock(baseDir string, hash *chainhash.Hash, height int32,
-	client *rpcclient.Client) error {
-
-	blockDir := filepath.Join(baseDir, currentBlockDir(height))
-	err := os.MkdirAll(blockDir, DirectoryMode)
-	if err != nil {
-		return fmt.Errorf("error creating directory %s: %w", blockDir,
-			err)
-	}
-
-	fileName := fmt.Sprintf(BlocksFileNamePattern, blockDir, hash.String())
-	if fileExists(fileName) {
-		return nil
-	}
-
-	block, err := client.GetBlock(hash)
-	if err != nil {
-		return fmt.Errorf("error getting block for hash %s: %w", hash,
-			err)
-	}
-
-	// Write the actual block to disk.
-	file, err := os.Create(fileName)
-	if err != nil {
-		return fmt.Errorf("error creating file %s: %w", fileName, err)
-	}
-
-	if err := block.Serialize(file); err != nil {
-		return fmt.Errorf("error writing block to file %s: %w",
-			fileName, err)
-	}
-
-	err = file.Close()
-	if err != nil {
-		return fmt.Errorf("error closing file %s: %w", fileName, err)
 	}
 
 	return nil
@@ -322,7 +264,7 @@ func writeFilters(fileName string, startIndex, endIndex int32,
 		hash := heightToHash[j]
 		filter := filters[hash]
 
-		err := wire.WriteVarBytes(file, 0, filter[:])
+		err := wire.WriteVarBytes(file, 0, filter)
 		if err != nil {
 			return fmt.Errorf("error writing filter to file %s: %w",
 				fileName, err)
@@ -376,14 +318,4 @@ func writeStatus(baseDir string, status *Status) error {
 	}
 
 	return file.Close()
-}
-
-// filesExists reports whether the named file or directory exists.
-func fileExists(name string) bool {
-	if _, err := os.Stat(name); err != nil {
-		if os.IsNotExist(err) {
-			return false
-		}
-	}
-	return true
 }

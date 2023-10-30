@@ -19,8 +19,8 @@ func TestFilterHeaderConstruction(t *testing.T) {
 	filterBytes, _ := hex.DecodeString("017f23b0")
 
 	filterHash := chainhash.DoubleHashB(filterBytes)
-	concat := append(filterHash, prevHeader[:]...)
-	filterHeader2 := chainhash.DoubleHashH(concat)
+	filterHash = append(filterHash, prevHeader[:]...)
+	filterHeader2 := chainhash.DoubleHashH(filterHash)
 
 	// Filter header from mainnet block 500.
 	expectedHeader, _ := chainhash.NewHashFromStr(

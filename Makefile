@@ -1,4 +1,4 @@
-PKG := github.com/guggero/cfilter-cdn
+PKG := github.com/guggero/block-dn
 TOOLS_DIR := tools
 
 GOTEST := go test -v
@@ -36,7 +36,7 @@ ifneq ($(sys),)
 BUILD_SYSTEM = $(sys)
 endif
 
-DOCKER_TOOLS = docker run -v $$(pwd):/build cfilter-cdn-tools
+DOCKER_TOOLS = docker run -v $$(pwd):/build block-dn-tools
 
 TEST_FLAGS = -test.timeout=20m
 
@@ -61,21 +61,21 @@ unit:
 	$(UNIT)
 
 build:
-	@$(call print, "Building cfilter-cdn.")
+	@$(call print, "Building block-dn.")
 	$(GOBUILD) -ldflags "$(LDFLAGS)" ./...
 
 install:
-	@$(call print, "Installing cfilter-cdn.")
+	@$(call print, "Installing block-dn.")
 	$(GOINSTALL) -ldflags "$(LDFLAGS)" ./...
 
 release:
-	@$(call print, "Creating release of cfilter-cdn.")
-	rm -rf cfilter-cdn-v*
+	@$(call print, "Creating release of block-dn.")
+	rm -rf block-dn-v*
 	./release.sh build-release "$(VERSION_TAG)" "$(BUILD_SYSTEM)" "$(RELEASE_LDFLAGS)"
 
 docker-tools:
 	@$(call print, "Building tools docker image.")
-	docker build -q -t cfilter-cdn-tools $(TOOLS_DIR)
+	docker build -q -t block-dn-tools $(TOOLS_DIR)
 
 fmt: $(GOIMPORTS_BIN)
 	@$(call print, "Fixing imports.")

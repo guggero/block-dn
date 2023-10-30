@@ -1,2 +1,3 @@
-# cfilter-cdn
-Process BIP-157/158 cfilters for distribution over a CDN
+# block-dn
+
+Process BIP-157/158 cfilters and Bitcoin blocks for distribution over a CDN.
