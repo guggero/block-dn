@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 
@@ -16,6 +15,8 @@ import (
 const (
 	version = "0.0.1"
 	Commit  = ""
+
+	defaultListenPort = 8080
 )
 
 var (
@@ -29,12 +30,15 @@ type mainCommand struct {
 
 	baseDir string
 
+	listenAddr string
+
 	bitcoindConfig *rpcclient.ConnConfig
 	cmd            *cobra.Command
 }
 
 func main() {
 	cc := &mainCommand{
+		listenAddr: fmt.Sprintf("localhost:%d", defaultListenPort),
 		bitcoindConfig: &rpcclient.ConnConfig{
 			DisableTLS:   true,
 			HTTPPostMode: true,
@@ -60,18 +64,15 @@ func main() {
 			log.Infof("block-dn version v%s commit %s", version,
 				Commit)
 
-			client, err := rpcclient.New(cc.bitcoindConfig, nil)
+			server := newServer(
+				cc.baseDir, cc.listenAddr, cc.bitcoindConfig,
+				chainParams,
+			)
+			err := server.start()
 			if err != nil {
-				log.Errorf("Error connecting to bitcoind: %v",
-					err)
+				log.Errorf("Error starting server: %v", err)
 				return
 			}
-			defer client.Shutdown()
-
-			// Create a context that can be canceled when the user
-			// interrupts the program.
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
 
 			interceptor, err := signal.Intercept()
 			if err != nil {
@@ -80,31 +81,18 @@ func main() {
 				return
 			}
 
-			errChan := make(chan error, 1)
+			select {
+			case <-interceptor.ShutdownChannel():
+				log.Infof("Received shutdown signal")
 
-			go func() {
-				select {
-				case <-interceptor.ShutdownChannel():
-					log.Infof("Received shutdown signal")
-					cancel()
+			case err := <-server.errs.ChanOut():
+				log.Errorf("Error running server: %w", err)
+			}
 
-				case err := <-errChan:
-					log.Errorf("Error: %v", err)
-					cancel()
-				}
-			}()
-
-			go func() {
-				err = UpdateFilterFiles(
-					ctx, cc.baseDir, client, chainParams,
-				)
-				if err != nil {
-					errChan <- fmt.Errorf("error "+
-						"updating filter files: %v",
-						err)
-					return
-				}
-			}()
+			err = server.stop()
+			if err != nil {
+				log.Errorf("Error stopping server: %v", err)
+			}
 		},
 		DisableAutoGenTag: true,
 	}
@@ -119,6 +107,10 @@ func main() {
 	cc.cmd.PersistentFlags().StringVarP(
 		&cc.baseDir, "base-dir", "", "", "The base directory "+
 			"where the generated files will be stored",
+	)
+	cc.cmd.PersistentFlags().StringVarP(
+		&cc.listenAddr, "listen-addr", "", cc.listenAddr, "The local "+
+			"host:port to listen on",
 	)
 	cc.cmd.PersistentFlags().StringVarP(
 		&cc.bitcoindConfig.Host, "bitcoind-host", "", "localhost:8332",

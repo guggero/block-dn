@@ -4,7 +4,9 @@ require (
 	github.com/btcsuite/btcd v0.23.5-0.20230125025938-be056b0a0b2f
 	github.com/btcsuite/btcd/chaincfg/chainhash v1.0.2
 	github.com/btcsuite/btclog v0.0.0-20170628155309-84c8d2346e9f
+	github.com/gorilla/mux v1.8.0
 	github.com/lightningnetwork/lnd v0.16.0-beta
+	github.com/lightningnetwork/lnd/queue v1.1.0
 	github.com/spf13/cobra v1.6.1
 	github.com/stretchr/testify v1.8.1
 )
@@ -27,6 +29,7 @@ require (
 	github.com/jrick/logrotate v1.0.0 // indirect
 	github.com/kkdai/bstream v1.0.0 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
+	github.com/lightningnetwork/lnd/ticker v1.1.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/syndtr/goleveldb v1.0.1-0.20210819022825-2ae1ddf74ef7 // indirect
