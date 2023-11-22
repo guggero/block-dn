@@ -64,6 +64,11 @@ func main() {
 			log.Infof("block-dn version v%s commit %s", version,
 				Commit)
 
+			if cc.baseDir == "" {
+				log.Errorf("Base directory must be set")
+				return
+			}
+
 			server := newServer(
 				cc.baseDir, cc.listenAddr, cc.bitcoindConfig,
 				chainParams,
@@ -86,7 +91,7 @@ func main() {
 				log.Infof("Received shutdown signal")
 
 			case err := <-server.errs.ChanOut():
-				log.Errorf("Error running server: %w", err)
+				log.Errorf("Error running server: %v", err)
 			}
 
 			err = server.stop()

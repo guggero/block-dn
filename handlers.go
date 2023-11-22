@@ -48,102 +48,44 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *server) headersRequestHandler(w http.ResponseWriter, r *http.Request) {
-	height, err := parseRequestParamInt64(r, "height")
-	if err != nil {
-		sendError(w, err)
-		return
-	}
-
-	headerDir := filepath.Join(s.baseDir, HeaderFileDir)
-	fileName := fmt.Sprintf(
-		HeaderFileNamePattern, headerDir, height,
-		height+HeadersPerFile-1,
+	s.heightBasedRequestHandler(
+		w, r, HeaderFileDir, HeaderFileNamePattern,
+		HeadersPerFile, s.serializeHeaders,
 	)
-	if fileExists(fileName) {
-		addCacheHeaders(w, maxAgeDisk)
-		w.WriteHeader(http.StatusOK)
-		if err := streamFile(w, fileName); err != nil {
-			log.Errorf("Error while streaming file: %v", err)
-			sendError(w, err)
-		}
-
-		return
-	}
-
-	s.cacheLock.RLock()
-	defer s.cacheLock.RUnlock()
-
-	if _, ok := s.heightToHash[int32(height)]; !ok {
-		sendError(w, fmt.Errorf("invalid height"))
-		return
-	}
-
-	// The requested start height wasn't yet in a file, so we need to
-	// stream the headers from memory.
-	addCacheHeaders(w, maxAgeMemory)
-	w.WriteHeader(http.StatusOK)
-	err = s.serializeHeaders(w, int32(height), s.currentHeight.Load())
-	if err != nil {
-		log.Errorf("Error serializing headers: %v", err)
-	}
 }
 
 func (s *server) filterHeadersRequestHandler(w http.ResponseWriter,
 	r *http.Request) {
 
-	height, err := parseRequestParamInt64(r, "height")
-	if err != nil {
-		sendError(w, err)
-		return
-	}
-
-	headerDir := filepath.Join(s.baseDir, HeaderFileDir)
-	fileName := fmt.Sprintf(
-		FilterHeaderFileNamePattern, headerDir, height,
-		height+HeadersPerFile-1,
+	s.heightBasedRequestHandler(
+		w, r, HeaderFileDir, FilterHeaderFileNamePattern,
+		HeadersPerFile, s.serializeFilterHeaders,
 	)
-	if fileExists(fileName) {
-		addCacheHeaders(w, maxAgeDisk)
-		w.WriteHeader(http.StatusOK)
-		if err := streamFile(w, fileName); err != nil {
-			log.Errorf("Error while streaming file: %v", err)
-			sendError(w, err)
-		}
-
-		return
-	}
-
-	s.cacheLock.RLock()
-	defer s.cacheLock.RUnlock()
-
-	if _, ok := s.heightToHash[int32(height)]; !ok {
-		sendError(w, fmt.Errorf("invalid height"))
-		return
-	}
-
-	// The requested start height wasn't yet in a file, so we need to
-	// stream the headers from memory.
-	addCacheHeaders(w, maxAgeMemory)
-	w.WriteHeader(http.StatusOK)
-	err = s.serializeFilterHeaders(w, int32(height), s.currentHeight.Load())
-	if err != nil {
-		log.Errorf("Error serializing filter headers: %v", err)
-	}
 }
 
 func (s *server) filtersRequestHandler(w http.ResponseWriter,
 	r *http.Request) {
 
+	s.heightBasedRequestHandler(
+		w, r, FilterFileDir, FilterFileNamePattern, FiltersPerFile,
+		s.serializeFilters,
+	)
+}
+
+func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
+	r *http.Request, subDir, fileNamePattern string,
+	numEntriesPerFile int64, serializeCb func(w io.Writer, startIndex,
+		endIndex int32) error) {
+
 	height, err := parseRequestParamInt64(r, "height")
 	if err != nil {
 		sendError(w, err)
 		return
 	}
 
-	filterDir := filepath.Join(s.baseDir, FilterFileDir)
+	srcDir := filepath.Join(s.baseDir, subDir)
 	fileName := fmt.Sprintf(
-		FilterFileNamePattern, filterDir, height,
-		height+FiltersPerFile-1,
+		fileNamePattern, srcDir, height, height+numEntriesPerFile-1,
 	)
 	if fileExists(fileName) {
 		addCacheHeaders(w, maxAgeDisk)
@@ -168,9 +110,9 @@ func (s *server) filtersRequestHandler(w http.ResponseWriter,
 	// stream the headers from memory.
 	addCacheHeaders(w, maxAgeMemory)
 	w.WriteHeader(http.StatusOK)
-	err = s.serializeFilters(w, int32(height), s.currentHeight.Load())
+	err = serializeCb(w, int32(height), s.currentHeight.Load())
 	if err != nil {
-		log.Errorf("Error serializing filters: %v", err)
+		log.Errorf("Error serializing: %v", err)
 	}
 }
 

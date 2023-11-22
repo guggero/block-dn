@@ -17,7 +17,7 @@ import (
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/gorilla/mux"
-	"github.com/lightningnetwork/lnd/queue"
+	"github.com/lightninglabs/taproot-assets/fn"
 )
 
 var (
@@ -46,7 +46,7 @@ type server struct {
 	cacheLock sync.RWMutex
 
 	wg   sync.WaitGroup
-	errs *queue.ConcurrentQueue
+	errs *fn.ConcurrentQueue[error]
 	quit chan struct{}
 }
 
@@ -68,7 +68,7 @@ func newServer(baseDir, listenAddr string, chainCfg *rpcclient.ConnConfig,
 		),
 		filters: make(map[chainhash.Hash][]byte, FiltersPerFile),
 
-		errs: queue.NewConcurrentQueue(2),
+		errs: fn.NewConcurrentQueue[error](2),
 		quit: make(chan struct{}),
 	}
 
@@ -128,7 +128,6 @@ func (s *server) start() error {
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			s.errs.ChanIn() <- err
 		}
-
 	}()
 
 	return nil
@@ -153,8 +152,7 @@ func (s *server) stop() error {
 	case err, ok := <-s.errs.ChanOut():
 		if ok {
 			log.Errorf("Error shutting down: %v", err)
-			stopErr = fmt.Errorf("error shutting down: %w",
-				err.(error))
+			stopErr = fmt.Errorf("error shutting down: %w", err)
 		}
 
 	default:
