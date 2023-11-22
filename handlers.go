@@ -73,9 +73,7 @@ func (s *server) filterHeadersRequestHandler(w http.ResponseWriter,
 	)
 }
 
-func (s *server) filtersRequestHandler(w http.ResponseWriter,
-	r *http.Request) {
-
+func (s *server) filtersRequestHandler(w http.ResponseWriter, r *http.Request) {
 	s.heightBasedRequestHandler(
 		w, r, FilterFileDir, FilterFileNamePattern, FiltersPerFile,
 		s.serializeFilters,
@@ -87,9 +85,16 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 	numEntriesPerFile int64, serializeCb func(w io.Writer, startIndex,
 		endIndex int32) error) {
 
+	// These kinds of requests aren't available in light mode.
+	if s.lightMode {
+		sendUnavailable(w, fmt.Errorf("endpoint not available in "+
+			"light mode"))
+		return
+	}
+
 	height, err := parseRequestParamInt64(r, "height")
 	if err != nil {
-		sendError(w, err)
+		sendBadRequest(w, err)
 		return
 	}
 
@@ -112,7 +117,7 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 	defer s.cacheLock.RUnlock()
 
 	if _, ok := s.heightToHash[int32(height)]; !ok {
-		sendError(w, fmt.Errorf("invalid height"))
+		sendBadRequest(w, fmt.Errorf("invalid height"))
 		return
 	}
 
@@ -131,13 +136,13 @@ func (s *server) blockRequestHandler(w http.ResponseWriter, r *http.Request) {
 	blockHash := vars["hash"]
 
 	if len(blockHash) != hex.EncodedLen(chainhash.HashSize) {
-		sendError(w, fmt.Errorf("invalid block hash"))
+		sendBadRequest(w, fmt.Errorf("invalid block hash"))
 		return
 	}
 
 	hash, err := chainhash.NewHashFromStr(blockHash)
 	if err != nil {
-		sendError(w, err)
+		sendBadRequest(w, err)
 		return
 	}
 
@@ -191,6 +196,16 @@ func parseRequestParamInt64(r *http.Request, name string) (int64, error) {
 	}
 
 	return paramValue, nil
+}
+
+func sendUnavailable(w http.ResponseWriter, err error) {
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = w.Write([]byte(err.Error()))
+}
+
+func sendBadRequest(w http.ResponseWriter, err error) {
+	w.WriteHeader(http.StatusBadRequest)
+	_, _ = w.Write([]byte(err.Error()))
 }
 
 func sendError(w http.ResponseWriter, err error) {

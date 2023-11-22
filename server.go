@@ -28,6 +28,7 @@ var (
 )
 
 type server struct {
+	lightMode   bool
 	baseDir     string
 	listenAddr  string
 	chainCfg    *rpcclient.ConnConfig
@@ -50,10 +51,11 @@ type server struct {
 	quit chan struct{}
 }
 
-func newServer(baseDir, listenAddr string, chainCfg *rpcclient.ConnConfig,
-	chainParams *chaincfg.Params) *server {
+func newServer(lightMode bool, baseDir, listenAddr string,
+	chainCfg *rpcclient.ConnConfig, chainParams *chaincfg.Params) *server {
 
 	s := &server{
+		lightMode:   lightMode,
 		baseDir:     baseDir,
 		listenAddr:  listenAddr,
 		chainCfg:    chainCfg,
@@ -108,26 +110,32 @@ func (s *server) start() error {
 	go func() {
 		defer func() {
 			s.wg.Done()
-			log.Infof("Background filter file update finished")
-		}()
-
-		log.Infof("Starting background filter file update")
-		err := s.updateFiles()
-		if err != nil && !errors.Is(err, errServerShutdown) {
-			s.errs.ChanIn() <- err
-		}
-	}()
-
-	s.wg.Add(1)
-	go func() {
-		defer func() {
-			s.wg.Done()
 			log.Infof("Web server finished")
 		}()
 
 		log.Infof("Starting web server at %v", s.listenAddr)
 		err := s.httpServer.ListenAndServe()
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			s.errs.ChanIn() <- err
+		}
+	}()
+
+	// If we're running in light mode, we don't need to create any files,
+	// so we can just return here.
+	if s.lightMode {
+		return nil
+	}
+
+	s.wg.Add(1)
+	go func() {
+		defer func() {
+			s.wg.Done()
+			log.Infof("Background filter file update finished")
+		}()
+
+		log.Infof("Starting background filter file update")
+		err := s.updateFiles()
+		if err != nil && !errors.Is(err, errServerShutdown) {
 			s.errs.ChanIn() <- err
 		}
 	}()

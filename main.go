@@ -28,6 +28,8 @@ type mainCommand struct {
 	testnet bool
 	regtest bool
 
+	lightMode bool
+
 	baseDir string
 
 	listenAddr string
@@ -64,14 +66,15 @@ func main() {
 			log.Infof("block-dn version v%s commit %s", version,
 				Commit)
 
-			if cc.baseDir == "" {
-				log.Errorf("Base directory must be set")
+			if !cc.lightMode && cc.baseDir == "" {
+				log.Errorf("Base directory must be set if " +
+					"not running in light mode")
 				return
 			}
 
 			server := newServer(
-				cc.baseDir, cc.listenAddr, cc.bitcoindConfig,
-				chainParams,
+				cc.lightMode, cc.baseDir, cc.listenAddr,
+				cc.bitcoindConfig, chainParams,
 			)
 			err := server.start()
 			if err != nil {
@@ -108,6 +111,13 @@ func main() {
 	cc.cmd.PersistentFlags().BoolVarP(
 		&cc.regtest, "regtest", "r", false, "Indicates if regtest "+
 			"parameters should be used",
+	)
+	cc.cmd.PersistentFlags().BoolVarP(
+		&cc.lightMode, "light-mode", "l", false, "Indicates if the "+
+			"server should run in light mode which creates no "+
+			"files on disk and therefore requires zero disk "+
+			"space; but only the status and block endpoints are "+
+			"available in this mode",
 	)
 	cc.cmd.PersistentFlags().StringVarP(
 		&cc.baseDir, "base-dir", "", "", "The base directory "+
