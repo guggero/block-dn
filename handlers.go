@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -18,10 +19,19 @@ import (
 var (
 	maxAgeMemory = time.Minute
 	maxAgeDisk   = time.Hour * 24 * 365
+
+	//go:embed index.html
+	indexHTML string
 )
 
 type serializable interface {
 	Serialize(w io.Writer) error
+}
+
+func (s *server) indexRequestHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/html")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(indexHTML))
 }
 
 func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {

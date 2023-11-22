@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Block Delivery Network</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            display: flex;
+        }
+
+        #navbar {
+            width: 300px;
+            background-color: #f4f4f4;
+            padding: 10px;
+            height: 100vh;
+            box-shadow: 2px 0 5px rgba(0, 0, 0, 0.1);
+        }
+
+        #navbar a {
+            text-decoration: none;
+            color: #333;
+            display: block;
+            padding: 8px;
+        }
+
+        #navbar b {
+            color: #333333;
+            display: block;
+            padding: 8px;
+        }
+
+        #navbar a:hover {
+            background-color: #ddd;
+        }
+
+        #content {
+            flex-grow: 1;
+            padding: 20px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+
+        th {
+            background-color: #f0f0f0;
+        }
+    </style>
+</head>
+<body>
+<div id="navbar">
+    <b>Content:</b>
+    <a href="#content">What is BDN?</a>
+    <a href="#rest">REST endpoints</a>
+    <a href="#github">GitHub</a>
+</div>
+<div id="content">
+    <h1>Block Delivery Network</h1>
+    <p>
+        <code>block-dn</code> is a simple web server that connects to your
+        existing Bitcoin full node to serve data from the time chain to fetch
+        over HTTP(S).
+        <br />
+        The goal is to serve the following data to Light Clients (e.g. mobile
+        wallets):
+    </p>
+    <ul>
+        <li>Block headers</li>
+        <li>Blocks</li>
+        <li>Compact Filter headers</li>
+        <li>Compact Filters</li>
+    </ul>
+    <p>
+        There are two ways to use <code>block-dn</code>:
+    </p>
+    <h2>Connect to your own node</h2>
+    <p>
+        Install and run <code>block-dn</code> on your own device and configure
+        that HTTP endpoint in your compatible wallet. Your own node's chain
+        information is then used to sync the wallet state.
+    </p>
+    <h2>Use the Cloud Flare CDN cached instance</h2>
+    <p>
+        If you have a way to find out the current most recent block hash from
+        your peers or your own node, the rest of the chain data (e.g. block
+        headers, blocks, compact filters) can be downloaded from an untrusted
+        source. Such an untrusted source can be found at
+        <a href="https://bdn.world">bdn.world</a> and
+        <a href="https://block-dn.org">block-dn.org</a> respectively. Both these
+        sites run an instance of <code>block-dn</code> and are behind Cloud
+        Flare's caching proxy service, effectively caching the data in
+        geographically distributed sites around the world for maximum access
+        speed and very low latency.
+    </p>
+
+    <section id="rest">
+        <h2>Available REST endpoints</h2>
+        <table>
+            <tr>
+                <th>Endpoint</th>
+                <th>Description</th>
+                <th>Example</th>
+            </tr>
+            <tr>
+                <td><code>/status</code></td>
+                <td>
+                    Returns a JSON file with the latest block height and hash.
+                </td>
+                <td>
+                    <a href="https://bdn.world/status">bdn.world/status</a>
+                </td>
+            </tr>
+            <tr>
+                <td><code>/block/&lt;block_hash&gt;</code></td>
+                <td>
+                    Returns a single block, identified by its block hash.
+                </td>
+                <td>
+                    <a href="https://bdn.world/block/000000000000000000030ee5fab96c79dad247fc458d488dd7928d2536e75efc">
+                        bdn.world/block/000000000000000000030ee5....
+                    </a>
+                </td>
+            </tr>
+            <tr>
+                <td><code>/headers/&lt;start_block&gt;</code></td>
+                <td>
+                    Returns a binary file containing 100'000 block headers,
+                    serialized as 80 bytes per header (8 GB per file).
+                </td>
+                <td>
+                    <a href="https://bdn.world/headers/0">
+                        bdn.world/headers/0
+                    </a>
+                </td>
+            </tr>
+            <tr>
+                <td><code>/filter-headers/&lt;start_block&gt;</code></td>
+                <td>
+                    Returns a binary file containing 100'000 compact filter
+                    headers, serialized as 32 bytes per filter header hash
+                    (3.2 GB per file).
+                </td>
+                <td>
+                    <a href="https://bdn.world/filter-headers/100000">
+                        bdn.world/filter-headers/100000
+                    </a>
+                </td>
+            </tr>
+            <tr>
+                <td><code>/filters/&lt;start_block&gt;</code></td>
+                <td>
+                    Returns a binary file containing 2'000 compact filters,
+                    serialized as variable length byte arrays:
+                    Each filter starting with a <code>VarInt</code> specifying
+                    the length of a filter, followed by that many bytes for the
+                    actual filter (up to 58 MiB per file as per block 817'995).
+                </td>
+                <td>
+                    <a href="https://bdn.world/filters/802000">
+                        bdn.world/filters/802000
+                    </a>
+                </td>
+            </tr>
+        </table>
+    </section>
+    <section id="github">
+        <h2>Source code on GitHub</h2>
+        <p>
+            Check out the source code and installation instructions for this
+            project at <a href="https://github.com/guggero/block-dn">
+            github.com/guggero/block-dn</a>.
+        </p>
+    </section>
+</div>
+</body>
+</html>

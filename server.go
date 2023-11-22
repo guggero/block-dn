@@ -73,6 +73,8 @@ func newServer(baseDir, listenAddr string, chainCfg *rpcclient.ConnConfig,
 	}
 
 	router := mux.NewRouter()
+	router.HandleFunc("/", s.indexRequestHandler)
+	router.HandleFunc("/index.html", s.indexRequestHandler)
 	router.HandleFunc("/status", s.statusRequestHandler)
 	router.HandleFunc("/headers/{height:[0-9]+}", s.headersRequestHandler)
 	router.HandleFunc(
