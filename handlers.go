@@ -45,11 +45,18 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
+	bestFilter, ok := s.filterHeaders[bestBlock]
+	if !ok {
+		sendError(w, fmt.Errorf("invalid sync status"))
+		return
+	}
+
 	status := &Status{
 		ChainGenesisHash: s.chainParams.GenesisHash.String(),
 		ChainName:        s.chainParams.Name,
 		BestBlockHeight:  bestHeight,
 		BestBlockHash:    bestBlock.String(),
+		BestFilterHeader: bestFilter.String(),
 		EntriesPerHeader: HeadersPerFile,
 		EntriesPerFilter: FiltersPerFile,
 	}
