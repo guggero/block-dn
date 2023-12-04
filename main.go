@@ -13,13 +13,15 @@ import (
 )
 
 const (
-	version = "0.0.1"
-	Commit  = ""
+	version = "1.0.4"
 
 	defaultListenPort = 8080
 )
 
 var (
+	// Commit will be injected at compile-time with the `-X` ldflag.
+	Commit = ""
+
 	logWriter = build.NewRotatingLogWriter()
 	log       = build.NewSubLogger("BLDN", genSubLogger(logWriter))
 )
