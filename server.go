@@ -17,7 +17,7 @@ import (
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/gorilla/mux"
-	"github.com/lightninglabs/taproot-assets/fn"
+	"github.com/lightningnetwork/lnd/fn/v2"
 )
 
 var (

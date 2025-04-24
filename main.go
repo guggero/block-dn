@@ -6,14 +6,14 @@ import (
 
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/rpcclient"
-	"github.com/btcsuite/btclog"
+	"github.com/btcsuite/btclog/v2"
 	"github.com/lightningnetwork/lnd/build"
 	"github.com/lightningnetwork/lnd/signal"
 	"github.com/spf13/cobra"
 )
 
 const (
-	version = "1.0.4"
+	version = "1.0.6"
 
 	defaultListenPort = 8080
 )
@@ -22,8 +22,8 @@ var (
 	// Commit will be injected at compile-time with the `-X` ldflag.
 	Commit = ""
 
-	logWriter = build.NewRotatingLogWriter()
-	log       = build.NewSubLogger("BLDN", genSubLogger(logWriter))
+	logMgr *build.SubLoggerManager
+	log    btclog.Logger
 )
 
 type mainCommand struct {
@@ -150,21 +150,28 @@ func main() {
 }
 
 func setupLogging() {
+	logConfig := build.DefaultLogConfig()
+	logWriter := build.NewRotatingLogWriter()
+	logMgr = build.NewSubLoggerManager(build.NewDefaultLogHandlers(
+		logConfig, logWriter,
+	)...)
+	log = build.NewSubLogger("BLDN", genSubLogger(logMgr))
+
 	setSubLogger("BLDN", log)
-	err := logWriter.InitLogRotator("./block-dn.log", 10, 3)
+	err := logWriter.InitLogRotator(logConfig.File, "./block-dn.log")
 	if err != nil {
 		panic(err)
 	}
-	err = build.ParseAndSetDebugLevels("debug", logWriter)
+	err = build.ParseAndSetDebugLevels("debug", logMgr)
 	if err != nil {
 		panic(err)
 	}
 }
 
 // genSubLogger creates a sub logger with an empty shutdown function.
-func genSubLogger(logWriter *build.RotatingLogWriter) func(string) btclog.Logger {
+func genSubLogger(root *build.SubLoggerManager) func(string) btclog.Logger {
 	return func(s string) btclog.Logger {
-		return logWriter.GenSubLogger(s, func() {})
+		return root.GenSubLogger(s, func() {})
 	}
 }
 
@@ -173,7 +180,7 @@ func genSubLogger(logWriter *build.RotatingLogWriter) func(string) btclog.Logger
 func setSubLogger(subsystem string, logger btclog.Logger,
 	useLoggers ...func(btclog.Logger)) {
 
-	logWriter.RegisterSubLogger(subsystem, logger)
+	logMgr.RegisterSubLogger(subsystem, logger)
 	for _, useLogger := range useLoggers {
 		useLogger(logger)
 	}
