@@ -247,6 +247,15 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 		lastHeight  = int64(-1)
 	)
 	for ; startHeight <= height; startHeight += numEntriesPerFile {
+		// We always start at 0, so we'll always have one entry less
+		// in the files than the even height we require the user to
+		// enter.
+		// TODO(guggero): Allow returning any range, even if that would
+		// mean returning a partial file.
+		if startHeight == height {
+			return
+		}
+
 		srcDir := filepath.Join(s.baseDir, subDir)
 		fileName := fmt.Sprintf(
 			fileNamePattern, srcDir, startHeight,
