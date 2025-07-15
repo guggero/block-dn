@@ -109,6 +109,12 @@ func (s *server) headersImportRequestHandler(w http.ResponseWriter,
 		return
 	}
 
+	if height == 0 || height%HeadersPerFile != 0 {
+		sendBadRequest(w, fmt.Errorf("height %d must be a multiple of "+
+			"%d", height, HeadersPerFile))
+		return
+	}
+
 	s.heightBasedImportRequestHandler(
 		w, height, HeaderFileDir, HeaderFileNamePattern, HeadersPerFile,
 		s.serializeHeaders, typeBlockHeader,
@@ -143,6 +149,12 @@ func (s *server) filterHeadersImportRequestHandler(w http.ResponseWriter,
 	if int32(height) > s.currentHeight.Load() {
 		sendBadRequest(w, fmt.Errorf("height %d is greater than "+
 			"current height %d", height, s.currentHeight.Load()))
+		return
+	}
+
+	if height == 0 || height%HeadersPerFile != 0 {
+		sendBadRequest(w, fmt.Errorf("height %d must be a multiple of "+
+			"%d", height, HeadersPerFile))
 		return
 	}
 
