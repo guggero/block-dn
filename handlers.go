@@ -2,6 +2,7 @@ package main
 
 import (
 	_ "embed"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -19,6 +20,21 @@ import (
 var (
 	maxAgeMemory = time.Minute
 	maxAgeDisk   = time.Hour * 24 * 365
+
+	// importMetadataSize is the size of the metadata that is prepended to
+	// each imported file. It consists of 4 bytes (uint32 little endian) for
+	// the Bitcoin network identifier, 1 byte for the file type (0 for block
+	// headers, 1 for compact filter headers) and 4 bytes (uint32 little
+	// endian) for the start header.
+	importMetadataSize = 4 + 1 + 4
+
+	// typeBlockHeader is the byte value used to indicate that the file
+	// contains block headers.
+	typeBlockHeader = byte(0)
+
+	// typeFilterHeader is the byte value used to indicate that the file
+	// contains compact filter headers.
+	typeFilterHeader = byte(1)
 
 	//go:embed index.html
 	indexHTML string
@@ -71,12 +87,68 @@ func (s *server) headersRequestHandler(w http.ResponseWriter, r *http.Request) {
 	)
 }
 
+func (s *server) headersImportRequestHandler(w http.ResponseWriter,
+	r *http.Request) {
+
+	// These kinds of requests aren't available in light mode.
+	if s.lightMode {
+		sendUnavailable(w, fmt.Errorf("endpoint not available in "+
+			"light mode"))
+		return
+	}
+
+	height, err := parseRequestParamInt64(r, "height")
+	if err != nil {
+		sendBadRequest(w, err)
+		return
+	}
+
+	if int32(height) > s.currentHeight.Load() {
+		sendBadRequest(w, fmt.Errorf("height %d is greater than "+
+			"current height %d", height, s.currentHeight.Load()))
+		return
+	}
+
+	s.heightBasedImportRequestHandler(
+		w, height, HeaderFileDir, HeaderFileNamePattern, HeadersPerFile,
+		s.serializeHeaders, typeBlockHeader,
+	)
+}
+
 func (s *server) filterHeadersRequestHandler(w http.ResponseWriter,
 	r *http.Request) {
 
 	s.heightBasedRequestHandler(
 		w, r, HeaderFileDir, FilterHeaderFileNamePattern,
 		HeadersPerFile, s.serializeFilterHeaders,
+	)
+}
+
+func (s *server) filterHeadersImportRequestHandler(w http.ResponseWriter,
+	r *http.Request) {
+
+	// These kinds of requests aren't available in light mode.
+	if s.lightMode {
+		sendUnavailable(w, fmt.Errorf("endpoint not available in "+
+			"light mode"))
+		return
+	}
+
+	height, err := parseRequestParamInt64(r, "height")
+	if err != nil {
+		sendBadRequest(w, err)
+		return
+	}
+
+	if int32(height) > s.currentHeight.Load() {
+		sendBadRequest(w, fmt.Errorf("height %d is greater than "+
+			"current height %d", height, s.currentHeight.Load()))
+		return
+	}
+
+	s.heightBasedImportRequestHandler(
+		w, height, HeaderFileDir, FilterHeaderFileNamePattern,
+		HeadersPerFile, s.serializeFilterHeaders, typeFilterHeader,
 	)
 }
 
@@ -133,6 +205,64 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 	addCacheHeaders(w, maxAgeMemory)
 	w.WriteHeader(http.StatusOK)
 	err = serializeCb(w, int32(height), s.currentHeight.Load())
+	if err != nil {
+		log.Errorf("Error serializing: %v", err)
+	}
+}
+
+func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
+	height int64, subDir, fileNamePattern string, numEntriesPerFile int64,
+	serializeCb func(w io.Writer, startIndex, endIndex int32) error,
+	fileType byte) {
+
+	addCacheHeaders(w, maxAgeDisk)
+	w.WriteHeader(http.StatusOK)
+
+	metadata := make([]byte, importMetadataSize)
+	binary.LittleEndian.PutUint32(metadata[0:4], uint32(s.chainParams.Net))
+	metadata[4] = fileType
+
+	// We always start at height 0 for the import.
+	binary.LittleEndian.PutUint32(metadata[5:9], 0)
+
+	if _, err := w.Write(metadata); err != nil {
+		log.Errorf("Error writing metadata: %v", err)
+		return
+	}
+
+	var (
+		startHeight = int64(0)
+		lastHeight  = int64(-1)
+	)
+	for ; startHeight <= height; startHeight += numEntriesPerFile {
+		srcDir := filepath.Join(s.baseDir, subDir)
+		fileName := fmt.Sprintf(
+			fileNamePattern, srcDir, startHeight,
+			startHeight+numEntriesPerFile-1,
+		)
+
+		if !fileExists(fileName) {
+			break
+		}
+
+		lastHeight = startHeight + numEntriesPerFile - 1
+		if err := streamFile(w, fileName); err != nil {
+			log.Errorf("Error while streaming file: %v", err)
+			sendError(w, err)
+		}
+	}
+
+	s.cacheLock.RLock()
+	defer s.cacheLock.RUnlock()
+
+	if _, ok := s.heightToHash[int32(height)]; !ok {
+		sendBadRequest(w, fmt.Errorf("invalid height"))
+		return
+	}
+
+	// The requested start height wasn't yet in a file, so we need to
+	// stream the headers from memory.
+	err := serializeCb(w, int32(lastHeight+1), int32(height))
 	if err != nil {
 		log.Errorf("Error serializing: %v", err)
 	}

@@ -80,8 +80,16 @@ func newServer(lightMode bool, baseDir, listenAddr string,
 	router.HandleFunc("/status", s.statusRequestHandler)
 	router.HandleFunc("/headers/{height:[0-9]+}", s.headersRequestHandler)
 	router.HandleFunc(
+		"/headers/import/{height:[0-9]+}",
+		s.headersImportRequestHandler,
+	)
+	router.HandleFunc(
 		"/filter-headers/{height:[0-9]+}",
 		s.filterHeadersRequestHandler,
+	)
+	router.HandleFunc(
+		"/filter-headers/import/{height:[0-9]+}",
+		s.filterHeadersImportRequestHandler,
 	)
 	router.HandleFunc("/filters/{height:[0-9]+}", s.filtersRequestHandler)
 	router.HandleFunc("/block/{hash:[0-9a-f]+}", s.blockRequestHandler)
