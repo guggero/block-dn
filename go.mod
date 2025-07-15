@@ -3,9 +3,9 @@ module github.com/guggero/block-dn
 require (
 	github.com/btcsuite/btcd v0.24.3-0.20250407183411-cd05d9ad3d05
 	github.com/btcsuite/btcd/chaincfg/chainhash v1.1.0
-	github.com/btcsuite/btclog v0.0.0-20241003133417-09c4e92e319c
+	github.com/btcsuite/btclog/v2 v2.0.1-0.20250602222548-9967d19bb084
 	github.com/gorilla/mux v1.8.0
-	github.com/lightningnetwork/lnd v0.19.0-beta.rc3
+	github.com/lightningnetwork/lnd v0.19.2-beta.rc2
 	github.com/lightningnetwork/lnd/fn/v2 v2.0.8
 	github.com/spf13/cobra v1.6.1
 	github.com/stretchr/testify v1.9.0
@@ -15,7 +15,7 @@ require (
 	github.com/aead/siphash v1.0.1 // indirect
 	github.com/btcsuite/btcd/btcec/v2 v2.3.4 // indirect
 	github.com/btcsuite/btcd/btcutil v1.1.5 // indirect
-	github.com/btcsuite/btclog/v2 v2.0.1-0.20250110154127-3ae4bf1cb318 // indirect
+	github.com/btcsuite/btclog v0.0.0-20241003133417-09c4e92e319c // indirect
 	github.com/btcsuite/go-socks v0.0.0-20170105172521-4720035b7bfd // indirect
 	github.com/btcsuite/websocket v0.0.0-20150119174127-31079b680792 // indirect
 	github.com/btcsuite/winsvc v1.0.0 // indirect

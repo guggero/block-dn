@@ -54,7 +54,7 @@ func main() {
 			"filters and blocks over HTTP",
 		Long:    ``,
 		Version: fmt.Sprintf("v%s, commit %s", version, Commit),
-		Run: func(cmd *cobra.Command, args []string) {
+		Run: func(_ *cobra.Command, _ []string) {
 			chainParams := &chaincfg.MainNetParams
 			switch {
 			case cc.testnet:
