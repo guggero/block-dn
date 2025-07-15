@@ -48,3 +48,4 @@ linters:
     - err113
     - mnd
     - perfsprint
+    - godox
