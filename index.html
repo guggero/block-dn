@@ -205,6 +205,32 @@
                     </a>
                 </td>
             </tr>
+            <tr>
+                <td><code>/tx/out-proof/&lt;txid&gt;</code></td>
+                <td>
+                    Returns a binary merkle proof for the given transaction that
+                    proves it was included in the block. Returns an error if the
+                    transaction cannot be found or is not included in a block
+                    yet.
+                </td>
+                <td>
+                    <a href="https://block-dn.org/tx/out-proof/8f900c6414c5c27231080f46168105e9fec20f9fb2f11b25ee0312d89bc022c0">
+                        block-dn.org/tx/out-proof/8f900c6414c5c27231080f46168105e9fec20f9fb2f11b25ee0312d89bc022c0
+                    </a>
+                </td>
+            </tr>
+            <tr>
+                <td><code>/tx/raw/&lt;txid&gt;</code></td>
+                <td>
+                    Returns a binary response with the encoded transaction or
+                    an error if the transaction cannot be found.
+                </td>
+                <td>
+                    <a href="https://block-dn.org/tx/raw/8f900c6414c5c27231080f46168105e9fec20f9fb2f11b25ee0312d89bc022c0">
+                        block-dn.org/tx/raw/8f900c6414c5c27231080f46168105e9fec20f9fb2f11b25ee0312d89bc022c0
+                    </a>
+                </td>
+            </tr>
         </table>
     </section>
     <section id="github">

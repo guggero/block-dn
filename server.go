@@ -93,6 +93,12 @@ func newServer(lightMode bool, baseDir, listenAddr string,
 	)
 	router.HandleFunc("/filters/{height:[0-9]+}", s.filtersRequestHandler)
 	router.HandleFunc("/block/{hash:[0-9a-f]+}", s.blockRequestHandler)
+	router.HandleFunc(
+		"/tx/out-proof/{txid:[0-9a-f]+}", s.txOutProofRequestHandler,
+	)
+	router.HandleFunc(
+		"/tx/raw/{txid:[0-9a-f]+}", s.rawTxRequestHandler,
+	)
 
 	s.router = router
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	_ "embed"
 	"encoding/binary"
 	"encoding/hex"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/gorilla/mux"
 )
 
@@ -313,6 +315,65 @@ func (s *server) blockRequestHandler(w http.ResponseWriter, r *http.Request) {
 	sendBinary(w, block, maxAgeDisk)
 }
 
+func (s *server) txOutProofRequestHandler(w http.ResponseWriter,
+	r *http.Request) {
+
+	vars := mux.Vars(r)
+	txid := vars["txid"]
+
+	if len(txid) != hex.EncodedLen(chainhash.HashSize) {
+		sendBadRequest(w, fmt.Errorf("invalid transaction hash"))
+		return
+	}
+
+	hash, err := chainhash.NewHashFromStr(txid)
+	if err != nil {
+		sendBadRequest(w, err)
+		return
+	}
+
+	merkleBlock, err := s.chain.GetTxOutProof([]string{hash.String()}, nil)
+	if err != nil {
+		sendError(w, err)
+		return
+	}
+
+	var buf bytes.Buffer
+	err = merkleBlock.BtcEncode(
+		&buf, wire.ProtocolVersion, wire.WitnessEncoding,
+	)
+	if err != nil {
+		sendError(w, err)
+		return
+	}
+
+	sendRawBytes(w, buf.Bytes(), maxAgeDisk)
+}
+
+func (s *server) rawTxRequestHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	txid := vars["txid"]
+
+	if len(txid) != hex.EncodedLen(chainhash.HashSize) {
+		sendBadRequest(w, fmt.Errorf("invalid transaction hash"))
+		return
+	}
+
+	hash, err := chainhash.NewHashFromStr(txid)
+	if err != nil {
+		sendBadRequest(w, err)
+		return
+	}
+
+	tx, err := s.chain.GetRawTransaction(hash)
+	if err != nil {
+		sendError(w, err)
+		return
+	}
+
+	sendBinary(w, tx.MsgTx(), maxAgeDisk)
+}
+
 func sendJSON(w http.ResponseWriter, v interface{}, maxAge time.Duration) {
 	addCacheHeaders(w, maxAge)
 	w.Header().Set("Content-Type", "application/json")
@@ -328,6 +389,15 @@ func sendBinary(w http.ResponseWriter, v serializable, maxAge time.Duration) {
 	addCacheHeaders(w, maxAge)
 	w.WriteHeader(http.StatusOK)
 	err := v.Serialize(w)
+	if err != nil {
+		log.Errorf("Error serializing: %v", err)
+	}
+}
+
+func sendRawBytes(w http.ResponseWriter, payload []byte, maxAge time.Duration) {
+	addCacheHeaders(w, maxAge)
+	w.WriteHeader(http.StatusOK)
+	_, err := w.Write(payload)
 	if err != nil {
 		log.Errorf("Error serializing: %v", err)
 	}

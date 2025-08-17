@@ -49,3 +49,4 @@ linters:
     - mnd
     - perfsprint
     - godox
+    - gomoddirectives
