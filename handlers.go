@@ -25,10 +25,10 @@ var (
 
 	// importMetadataSize is the size of the metadata that is prepended to
 	// each imported file. It consists of 4 bytes (uint32 little endian) for
-	// the Bitcoin network identifier, 1 byte for the file type (0 for block
-	// headers, 1 for compact filter headers) and 4 bytes (uint32 little
-	// endian) for the start header.
-	importMetadataSize = 4 + 1 + 4
+	// the Bitcoin network identifier, 1 byte for the version, 1 byte for
+	// the file type (0 for block headers, 1 for compact filter headers) and
+	// 4 bytes (uint32 little endian) for the start header.
+	importMetadataSize = 4 + 1 + 1 + 4
 
 	// typeBlockHeader is the byte value used to indicate that the file
 	// contains block headers.
@@ -40,6 +40,11 @@ var (
 
 	//go:embed index.html
 	indexHTML string
+)
+
+const (
+	// headerImportVersion is the current version of the import file format.
+	headerImportVersion = 0
 )
 
 type serializable interface {
@@ -234,10 +239,11 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 
 	metadata := make([]byte, importMetadataSize)
 	binary.LittleEndian.PutUint32(metadata[0:4], uint32(s.chainParams.Net))
-	metadata[4] = fileType
+	metadata[4] = headerImportVersion
+	metadata[5] = fileType
 
 	// We always start at height 0 for the import.
-	binary.LittleEndian.PutUint32(metadata[5:9], 0)
+	binary.LittleEndian.PutUint32(metadata[6:10], 0)
 
 	if _, err := w.Write(metadata); err != nil {
 		log.Errorf("Error writing metadata: %v", err)
