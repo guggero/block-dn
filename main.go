@@ -16,6 +16,9 @@ const (
 	version = "1.0.6"
 
 	defaultListenPort = 8080
+
+	defaultMainnetReOrgSafeDepth = 6
+	defaultTestnetReOrgSafeDepth = 100
 )
 
 var (
@@ -37,6 +40,8 @@ type mainCommand struct {
 	baseDir string
 
 	listenAddr string
+
+	reOrgSafeDepth uint32
 
 	bitcoindConfig *rpcclient.ConnConfig
 	cmd            *cobra.Command
@@ -62,8 +67,26 @@ func main() {
 			case cc.testnet:
 				chainParams = &chaincfg.TestNet3Params
 
+				// The test networks are more prone to longer
+				// re-orgs.
+				if cc.reOrgSafeDepth ==
+					defaultMainnetReOrgSafeDepth {
+
+					cc.reOrgSafeDepth =
+						defaultTestnetReOrgSafeDepth
+				}
+
 			case cc.testnet4:
 				chainParams = &chaincfg.TestNet4Params
+
+				// The test networks are more prone to longer
+				// re-orgs.
+				if cc.reOrgSafeDepth ==
+					defaultMainnetReOrgSafeDepth {
+
+					cc.reOrgSafeDepth =
+						defaultTestnetReOrgSafeDepth
+				}
 
 			case cc.signet:
 				chainParams = &chaincfg.SigNetParams
@@ -85,6 +108,7 @@ func main() {
 			server := newServer(
 				cc.lightMode, cc.baseDir, cc.listenAddr,
 				cc.bitcoindConfig, chainParams,
+				cc.reOrgSafeDepth,
 			)
 			err := server.start()
 			if err != nil {
@@ -156,6 +180,12 @@ func main() {
 	cc.cmd.PersistentFlags().StringVar(
 		&cc.bitcoindConfig.Pass, "bitcoind-pass", "",
 		"The RPC password of the bitcoind instance to connect to",
+	)
+	cc.cmd.PersistentFlags().Uint32VarP(
+		&cc.reOrgSafeDepth, "reorg-safe-depth", "",
+		defaultMainnetReOrgSafeDepth,
+		"The number of blocks to wait before considering a block "+
+			"safe from re-orgs",
 	)
 
 	if err := cc.cmd.Execute(); err != nil {

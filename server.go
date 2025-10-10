@@ -28,14 +28,15 @@ var (
 )
 
 type server struct {
-	lightMode   bool
-	baseDir     string
-	listenAddr  string
-	chainCfg    *rpcclient.ConnConfig
-	chainParams *chaincfg.Params
-	chain       *rpcclient.Client
-	router      *mux.Router
-	httpServer  *http.Server
+	lightMode      bool
+	baseDir        string
+	listenAddr     string
+	chainCfg       *rpcclient.ConnConfig
+	chainParams    *chaincfg.Params
+	reOrgSafeDepth uint32
+	chain          *rpcclient.Client
+	router         *mux.Router
+	httpServer     *http.Server
 
 	currentHeight atomic.Int32
 
@@ -52,14 +53,16 @@ type server struct {
 }
 
 func newServer(lightMode bool, baseDir, listenAddr string,
-	chainCfg *rpcclient.ConnConfig, chainParams *chaincfg.Params) *server {
+	chainCfg *rpcclient.ConnConfig, chainParams *chaincfg.Params,
+	reOrgSafeDepth uint32) *server {
 
 	s := &server{
-		lightMode:   lightMode,
-		baseDir:     baseDir,
-		listenAddr:  listenAddr,
-		chainCfg:    chainCfg,
-		chainParams: chainParams,
+		lightMode:      lightMode,
+		baseDir:        baseDir,
+		listenAddr:     listenAddr,
+		chainCfg:       chainCfg,
+		chainParams:    chainParams,
+		reOrgSafeDepth: reOrgSafeDepth,
 
 		heightToHash: make(map[int32]chainhash.Hash, HeadersPerFile),
 		headers: make(

@@ -344,6 +344,13 @@ func (s *server) txOutProofRequestHandler(w http.ResponseWriter,
 		return
 	}
 
+	blockHash := merkleBlock.Header.BlockHash()
+	verboseHeader, err := s.chain.GetBlockHeaderVerbose(&blockHash)
+	if err != nil {
+		sendError(w, err)
+		return
+	}
+
 	var buf bytes.Buffer
 	err = merkleBlock.BtcEncode(
 		&buf, wire.ProtocolVersion, wire.WitnessEncoding,
@@ -353,7 +360,13 @@ func (s *server) txOutProofRequestHandler(w http.ResponseWriter,
 		return
 	}
 
-	sendRawBytes(w, buf.Bytes(), maxAgeDisk)
+	maxAge := maxAgeDisk
+	safeHeight := s.currentHeight.Load() - int32(s.reOrgSafeDepth)
+	if verboseHeader.Height > safeHeight {
+		maxAge = 0
+	}
+
+	sendRawBytes(w, buf.Bytes(), maxAge)
 }
 
 func (s *server) rawTxRequestHandler(w http.ResponseWriter, r *http.Request) {
@@ -410,6 +423,14 @@ func sendRawBytes(w http.ResponseWriter, payload []byte, maxAge time.Duration) {
 }
 
 func addCacheHeaders(w http.ResponseWriter, maxAge time.Duration) {
+	// A max-age of 0 means no caching at all, as something is not safe
+	// to cache yet.
+	if maxAge == 0 {
+		w.Header().Add("Cache-Control", "no-cache")
+
+		return
+	}
+
 	w.Header().Add(
 		"Cache-Control",
 		fmt.Sprintf("max-age=%d", int64(maxAge.Seconds())),
