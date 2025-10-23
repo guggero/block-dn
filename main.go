@@ -27,8 +27,10 @@ var (
 )
 
 type mainCommand struct {
-	testnet bool
-	regtest bool
+	testnet  bool
+	testnet4 bool
+	regtest  bool
+	signet   bool
 
 	lightMode bool
 
@@ -59,6 +61,12 @@ func main() {
 			switch {
 			case cc.testnet:
 				chainParams = &chaincfg.TestNet3Params
+
+			case cc.testnet4:
+				chainParams = &chaincfg.TestNet4Params
+
+			case cc.signet:
+				chainParams = &chaincfg.SigNetParams
 
 			case cc.regtest:
 				chainParams = &chaincfg.RegressionNetParams
@@ -111,7 +119,15 @@ func main() {
 			"parameters should be used",
 	)
 	cc.cmd.PersistentFlags().BoolVarP(
+		&cc.testnet4, "testnet4", "t4", false, "Indicates if testnet4 "+
+			"parameters should be used",
+	)
+	cc.cmd.PersistentFlags().BoolVarP(
 		&cc.regtest, "regtest", "r", false, "Indicates if regtest "+
+			"parameters should be used",
+	)
+	cc.cmd.PersistentFlags().BoolVarP(
+		&cc.signet, "signet", "s", false, "Indicates if signet "+
 			"parameters should be used",
 	)
 	cc.cmd.PersistentFlags().BoolVarP(
@@ -121,24 +137,24 @@ func main() {
 			"space; but only the status and block endpoints are "+
 			"available in this mode",
 	)
-	cc.cmd.PersistentFlags().StringVarP(
-		&cc.baseDir, "base-dir", "", "", "The base directory "+
+	cc.cmd.PersistentFlags().StringVar(
+		&cc.baseDir, "base-dir", "", "The base directory "+
 			"where the generated files will be stored",
 	)
-	cc.cmd.PersistentFlags().StringVarP(
-		&cc.listenAddr, "listen-addr", "", cc.listenAddr, "The local "+
+	cc.cmd.PersistentFlags().StringVar(
+		&cc.listenAddr, "listen-addr", cc.listenAddr, "The local "+
 			"host:port to listen on",
 	)
-	cc.cmd.PersistentFlags().StringVarP(
-		&cc.bitcoindConfig.Host, "bitcoind-host", "", "localhost:8332",
+	cc.cmd.PersistentFlags().StringVar(
+		&cc.bitcoindConfig.Host, "bitcoind-host", "localhost:8332",
 		"The host:port of the bitcoind instance to connect to",
 	)
-	cc.cmd.PersistentFlags().StringVarP(
-		&cc.bitcoindConfig.User, "bitcoind-user", "", "",
+	cc.cmd.PersistentFlags().StringVar(
+		&cc.bitcoindConfig.User, "bitcoind-user", "",
 		"The RPC username of the bitcoind instance to connect to",
 	)
-	cc.cmd.PersistentFlags().StringVarP(
-		&cc.bitcoindConfig.Pass, "bitcoind-pass", "", "",
+	cc.cmd.PersistentFlags().StringVar(
+		&cc.bitcoindConfig.Pass, "bitcoind-pass", "",
 		"The RPC password of the bitcoind instance to connect to",
 	)
 
