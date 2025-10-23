@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/rpcclient"
@@ -38,6 +39,7 @@ type mainCommand struct {
 	lightMode bool
 
 	baseDir string
+	logDir  string
 
 	listenAddr string
 
@@ -63,6 +65,9 @@ func main() {
 		Version: fmt.Sprintf("v%s, commit %s", version, Commit),
 		Run: func(_ *cobra.Command, _ []string) {
 			chainParams := &chaincfg.MainNetParams
+			headersPerFile := int32(DefaultHeadersPerFile)
+			filtersPerFile := int32(DefaultFiltersPerFile)
+
 			switch {
 			case cc.testnet:
 				chainParams = &chaincfg.TestNet3Params
@@ -93,9 +98,12 @@ func main() {
 
 			case cc.regtest:
 				chainParams = &chaincfg.RegressionNetParams
+
+				headersPerFile = DefaultRegtestHeadersPerFile
+				filtersPerFile = DefaultRegtestFiltersPerFile
 			}
 
-			setupLogging()
+			setupLogging(cc.logDir)
 			log.Infof("block-dn version v%s commit %s", version,
 				Commit)
 
@@ -108,7 +116,8 @@ func main() {
 			server := newServer(
 				cc.lightMode, cc.baseDir, cc.listenAddr,
 				cc.bitcoindConfig, chainParams,
-				cc.reOrgSafeDepth,
+				cc.reOrgSafeDepth, headersPerFile,
+				filtersPerFile,
 			)
 			err := server.start()
 			if err != nil {
@@ -166,6 +175,10 @@ func main() {
 			"where the generated files will be stored",
 	)
 	cc.cmd.PersistentFlags().StringVar(
+		&cc.logDir, "log-dir", ".", "The log directory where the log "+
+			"file will be written",
+	)
+	cc.cmd.PersistentFlags().StringVar(
 		&cc.listenAddr, "listen-addr", cc.listenAddr, "The local "+
 			"host:port to listen on",
 	)
@@ -195,7 +208,7 @@ func main() {
 	}
 }
 
-func setupLogging() {
+func setupLogging(logDir string) {
 	logConfig := build.DefaultLogConfig()
 	logWriter := build.NewRotatingLogWriter()
 	logMgr = build.NewSubLoggerManager(build.NewDefaultLogHandlers(
@@ -204,7 +217,9 @@ func setupLogging() {
 	log = build.NewSubLogger("BLDN", genSubLogger(logMgr))
 
 	setSubLogger("BLDN", log)
-	err := logWriter.InitLogRotator(logConfig.File, "./block-dn.log")
+	err := logWriter.InitLogRotator(
+		logConfig.File, filepath.Join(logDir, "block-dn.log"),
+	)
 	if err != nil {
 		panic(err)
 	}

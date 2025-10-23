@@ -80,8 +80,8 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 		BestBlockHeight:  bestHeight,
 		BestBlockHash:    bestBlock.String(),
 		BestFilterHeader: bestFilter.String(),
-		EntriesPerHeader: HeadersPerFile,
-		EntriesPerFilter: FiltersPerFile,
+		EntriesPerHeader: s.headersPerFile,
+		EntriesPerFilter: s.filtersPerFile,
 	}
 
 	sendJSON(w, status, maxAgeMemory)
@@ -90,7 +90,7 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 func (s *server) headersRequestHandler(w http.ResponseWriter, r *http.Request) {
 	s.heightBasedRequestHandler(
 		w, r, HeaderFileDir, HeaderFileNamePattern,
-		HeadersPerFile, s.serializeHeaders,
+		int64(s.headersPerFile), s.serializeHeaders,
 	)
 }
 
@@ -116,15 +116,15 @@ func (s *server) headersImportRequestHandler(w http.ResponseWriter,
 		return
 	}
 
-	if height == 0 || height%HeadersPerFile != 0 {
+	if height == 0 || height%int64(s.headersPerFile) != 0 {
 		sendBadRequest(w, fmt.Errorf("height %d must be a multiple of "+
-			"%d", height, HeadersPerFile))
+			"%d", height, s.headersPerFile))
 		return
 	}
 
 	s.heightBasedImportRequestHandler(
-		w, height, HeaderFileDir, HeaderFileNamePattern, HeadersPerFile,
-		s.serializeHeaders, typeBlockHeader,
+		w, height, HeaderFileDir, HeaderFileNamePattern,
+		int64(s.headersPerFile), s.serializeHeaders, typeBlockHeader,
 	)
 }
 
@@ -133,7 +133,7 @@ func (s *server) filterHeadersRequestHandler(w http.ResponseWriter,
 
 	s.heightBasedRequestHandler(
 		w, r, HeaderFileDir, FilterHeaderFileNamePattern,
-		HeadersPerFile, s.serializeFilterHeaders,
+		int64(s.headersPerFile), s.serializeFilterHeaders,
 	)
 }
 
@@ -159,22 +159,23 @@ func (s *server) filterHeadersImportRequestHandler(w http.ResponseWriter,
 		return
 	}
 
-	if height == 0 || height%HeadersPerFile != 0 {
+	if height == 0 || height%int64(s.headersPerFile) != 0 {
 		sendBadRequest(w, fmt.Errorf("height %d must be a multiple of "+
-			"%d", height, HeadersPerFile))
+			"%d", height, s.headersPerFile))
 		return
 	}
 
 	s.heightBasedImportRequestHandler(
 		w, height, HeaderFileDir, FilterHeaderFileNamePattern,
-		HeadersPerFile, s.serializeFilterHeaders, typeFilterHeader,
+		int64(s.headersPerFile), s.serializeFilterHeaders,
+		typeFilterHeader,
 	)
 }
 
 func (s *server) filtersRequestHandler(w http.ResponseWriter, r *http.Request) {
 	s.heightBasedRequestHandler(
-		w, r, FilterFileDir, FilterFileNamePattern, FiltersPerFile,
-		s.serializeFilters,
+		w, r, FilterFileDir, FilterFileNamePattern,
+		int64(s.filtersPerFile), s.serializeFilters,
 	)
 }
 

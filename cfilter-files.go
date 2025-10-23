@@ -15,8 +15,11 @@ import (
 )
 
 const (
-	HeadersPerFile = 100_000
-	FiltersPerFile = 2_000
+	DefaultHeadersPerFile = 100_000
+	DefaultFiltersPerFile = 2_000
+
+	DefaultRegtestHeadersPerFile = 2_000
+	DefaultRegtestFiltersPerFile = 2_000
 
 	HeaderFileDir = "headers"
 	FilterFileDir = "filters"

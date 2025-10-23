@@ -38,7 +38,9 @@ type server struct {
 	router         *mux.Router
 	httpServer     *http.Server
 
-	currentHeight atomic.Int32
+	headersPerFile int32
+	filtersPerFile int32
+	currentHeight  atomic.Int32
 
 	heightToHash  map[int32]chainhash.Hash
 	headers       map[chainhash.Hash]*wire.BlockHeader
@@ -54,7 +56,7 @@ type server struct {
 
 func newServer(lightMode bool, baseDir, listenAddr string,
 	chainCfg *rpcclient.ConnConfig, chainParams *chaincfg.Params,
-	reOrgSafeDepth uint32) *server {
+	reOrgSafeDepth uint32, headersPerFile, filtersPerFile int32) *server {
 
 	s := &server{
 		lightMode:      lightMode,
@@ -64,14 +66,17 @@ func newServer(lightMode bool, baseDir, listenAddr string,
 		chainParams:    chainParams,
 		reOrgSafeDepth: reOrgSafeDepth,
 
-		heightToHash: make(map[int32]chainhash.Hash, HeadersPerFile),
+		headersPerFile: headersPerFile,
+		filtersPerFile: filtersPerFile,
+
+		heightToHash: make(map[int32]chainhash.Hash, headersPerFile),
 		headers: make(
-			map[chainhash.Hash]*wire.BlockHeader, HeadersPerFile,
+			map[chainhash.Hash]*wire.BlockHeader, headersPerFile,
 		),
 		filterHeaders: make(
-			map[chainhash.Hash]*chainhash.Hash, HeadersPerFile,
+			map[chainhash.Hash]*chainhash.Hash, headersPerFile,
 		),
-		filters: make(map[chainhash.Hash][]byte, FiltersPerFile),
+		filters: make(map[chainhash.Hash][]byte, filtersPerFile),
 
 		errs: fn.NewConcurrentQueue[error](2),
 		quit: make(chan struct{}),
@@ -231,7 +236,7 @@ func (s *server) updateFiles() error {
 
 	// For the headers, we need a bigger range, so drop down the start block
 	// to the last header file.
-	startBlock = (startBlock / HeadersPerFile) * HeadersPerFile
+	startBlock = (startBlock / s.headersPerFile) * s.headersPerFile
 	log.Debugf("Need to start fetching headers and filters from block %d",
 		startBlock)
 
@@ -318,15 +323,15 @@ func (s *server) updateCacheAndFiles(startBlock, endBlock int32) error {
 		s.filterHeaders[*hash] = filterHeader
 		s.cacheLock.Unlock()
 
-		if (i+1)%FiltersPerFile == 0 {
-			fileStart := i - FiltersPerFile + 1
+		if (i+1)%s.filtersPerFile == 0 {
+			fileStart := i - s.filtersPerFile + 1
 			filterFileName := fmt.Sprintf(
 				FilterFileNamePattern, filterDir, fileStart, i,
 			)
 
 			log.Debugf("Reached header %d, writing file starting "+
 				"at %d, containing %d filters to %s", i,
-				fileStart, FiltersPerFile, filterFileName)
+				fileStart, s.filtersPerFile, filterFileName)
 
 			err = s.writeFilters(filterFileName, fileStart, i)
 			if err != nil {
@@ -335,8 +340,8 @@ func (s *server) updateCacheAndFiles(startBlock, endBlock int32) error {
 			}
 		}
 
-		if (i+1)%HeadersPerFile == 0 {
-			fileStart := i - HeadersPerFile + 1
+		if (i+1)%s.headersPerFile == 0 {
+			fileStart := i - s.headersPerFile + 1
 			headerFileName := fmt.Sprintf(
 				HeaderFileNamePattern, headerDir, fileStart, i,
 			)
@@ -347,7 +352,7 @@ func (s *server) updateCacheAndFiles(startBlock, endBlock int32) error {
 
 			log.Debugf("Reached header %d, writing file starting "+
 				"at %d, containing %d headers to %s", i,
-				fileStart, HeadersPerFile, headerFileName)
+				fileStart, s.headersPerFile, headerFileName)
 
 			err = s.writeHeaders(headerFileName, fileStart, i)
 			if err != nil {
@@ -357,7 +362,8 @@ func (s *server) updateCacheAndFiles(startBlock, endBlock int32) error {
 
 			log.Debugf("Reached header %d, writing file starting "+
 				"at %d, containing %d filter headers to %s", i,
-				fileStart, HeadersPerFile, filterHeaderFileName)
+				fileStart, s.headersPerFile,
+				filterHeaderFileName)
 
 			err = s.writeFilterHeaders(
 				filterHeaderFileName, fileStart, i,
@@ -380,13 +386,13 @@ func (s *server) updateCacheAndFiles(startBlock, endBlock int32) error {
 
 func (s *server) clearCache() {
 	s.cacheLock.Lock()
-	s.heightToHash = make(map[int32]chainhash.Hash, HeadersPerFile)
+	s.heightToHash = make(map[int32]chainhash.Hash, s.headersPerFile)
 	s.headers = make(
-		map[chainhash.Hash]*wire.BlockHeader, HeadersPerFile,
+		map[chainhash.Hash]*wire.BlockHeader, s.headersPerFile,
 	)
 	s.filterHeaders = make(
-		map[chainhash.Hash]*chainhash.Hash, HeadersPerFile,
+		map[chainhash.Hash]*chainhash.Hash, s.headersPerFile,
 	)
-	s.filters = make(map[chainhash.Hash][]byte, FiltersPerFile)
+	s.filters = make(map[chainhash.Hash][]byte, s.filtersPerFile)
 	s.cacheLock.Unlock()
 }
