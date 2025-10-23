@@ -114,24 +114,24 @@ func main() {
 		},
 		DisableAutoGenTag: true,
 	}
-	cc.cmd.PersistentFlags().BoolVarP(
-		&cc.testnet, "testnet", "t", false, "Indicates if testnet "+
+	cc.cmd.PersistentFlags().BoolVar(
+		&cc.testnet, "testnet", false, "Indicates if testnet "+
 			"parameters should be used",
 	)
-	cc.cmd.PersistentFlags().BoolVarP(
-		&cc.testnet4, "testnet4", "t4", false, "Indicates if testnet4 "+
+	cc.cmd.PersistentFlags().BoolVar(
+		&cc.testnet4, "testnet4", false, "Indicates if testnet4 "+
 			"parameters should be used",
 	)
-	cc.cmd.PersistentFlags().BoolVarP(
-		&cc.regtest, "regtest", "r", false, "Indicates if regtest "+
+	cc.cmd.PersistentFlags().BoolVar(
+		&cc.regtest, "regtest", false, "Indicates if regtest "+
 			"parameters should be used",
 	)
-	cc.cmd.PersistentFlags().BoolVarP(
-		&cc.signet, "signet", "s", false, "Indicates if signet "+
+	cc.cmd.PersistentFlags().BoolVar(
+		&cc.signet, "signet", false, "Indicates if signet "+
 			"parameters should be used",
 	)
-	cc.cmd.PersistentFlags().BoolVarP(
-		&cc.lightMode, "light-mode", "l", false, "Indicates if the "+
+	cc.cmd.PersistentFlags().BoolVar(
+		&cc.lightMode, "light-mode", false, "Indicates if the "+
 			"server should run in light mode which creates no "+
 			"files on disk and therefore requires zero disk "+
 			"space; but only the status and block endpoints are "+
