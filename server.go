@@ -138,6 +138,7 @@ func (s *server) start() error {
 		log.Infof("Starting web server at %v", s.listenAddr)
 		err := s.httpServer.ListenAndServe()
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Errorf("Error starting server: %v", err)
 			s.errs.ChanIn() <- err
 		}
 	}()
@@ -158,6 +159,7 @@ func (s *server) start() error {
 		log.Infof("Starting background filter file update")
 		err := s.updateFiles()
 		if err != nil && !errors.Is(err, errServerShutdown) {
+			log.Errorf("Error updating files: %v", err)
 			s.errs.ChanIn() <- err
 		}
 	}()
