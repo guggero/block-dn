@@ -141,6 +141,7 @@ func testStatus(t *testing.T, ctx *testContext) {
 
 	require.Contains(t, headers, "Cache-Control")
 	require.Equal(t, "max-age=60", headers.Get("Cache-Control"))
+	require.Equal(t, "*", headers.Get("Access-Control-Allow-Origin"))
 
 	height, blockHash := ctx.bestBlock(t)
 	require.Equal(t, height, status.BestBlockHeight)
@@ -148,10 +149,11 @@ func testStatus(t *testing.T, ctx *testContext) {
 }
 
 func testIndex(t *testing.T, ctx *testContext) {
-	data, _ := ctx.fetchBinary(t, "")
+	data, headers := ctx.fetchBinary(t, "")
 	require.Contains(
 		t, string(data), "<title>Block Delivery Network</title>",
 	)
+	require.Equal(t, "*", headers.Get("Access-Control-Allow-Origin"))
 }
 
 func testTxOutProof(t *testing.T, ctx *testContext) {
@@ -170,6 +172,7 @@ func testTxOutProof(t *testing.T, ctx *testContext) {
 
 	require.Contains(t, headers, "Cache-Control")
 	require.Equal(t, "max-age=1", headers.Get("Cache-Control"))
+	require.Equal(t, "*", headers.Get("Access-Control-Allow-Origin"))
 
 	// Then we verify that a sufficiently confirmed block has cache headers.
 	buriedHash, err := ctx.backend.GetBlockHash(
@@ -190,6 +193,7 @@ func testTxOutProof(t *testing.T, ctx *testContext) {
 
 	require.Contains(t, headers, "Cache-Control")
 	require.Equal(t, "max-age=31536000", headers.Get("Cache-Control"))
+	require.Equal(t, "*", headers.Get("Access-Control-Allow-Origin"))
 }
 
 func testTxRaw(t *testing.T, ctx *testContext) {
@@ -212,6 +216,7 @@ func testTxRaw(t *testing.T, ctx *testContext) {
 
 	require.Contains(t, headers, "Cache-Control")
 	require.Equal(t, "max-age=31536000", headers.Get("Cache-Control"))
+	require.Equal(t, "*", headers.Get("Access-Control-Allow-Origin"))
 }
 
 func TestBlockDN(t *testing.T) {

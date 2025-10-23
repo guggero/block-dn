@@ -53,6 +53,7 @@ type serializable interface {
 }
 
 func (s *server) indexRequestHandler(w http.ResponseWriter, _ *http.Request) {
+	addCorsHeaders(w)
 	w.Header().Set("Content-Type", "text/html")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(indexHTML))
@@ -203,6 +204,7 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 		fileNamePattern, srcDir, height, height+numEntriesPerFile-1,
 	)
 	if fileExists(fileName) {
+		addCorsHeaders(w)
 		addCacheHeaders(w, maxAgeDisk)
 		w.WriteHeader(http.StatusOK)
 		if err := streamFile(w, fileName); err != nil {
@@ -223,6 +225,7 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 
 	// The requested start height wasn't yet in a file, so we need to
 	// stream the headers from memory.
+	addCorsHeaders(w)
 	addCacheHeaders(w, maxAgeMemory)
 	w.WriteHeader(http.StatusOK)
 	err = serializeCb(w, int32(height), s.currentHeight.Load())
@@ -236,6 +239,7 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 	serializeCb func(w io.Writer, startIndex, endIndex int32) error,
 	fileType byte) {
 
+	addCorsHeaders(w)
 	addCacheHeaders(w, maxAgeDisk)
 	w.WriteHeader(http.StatusOK)
 
@@ -397,6 +401,7 @@ func (s *server) rawTxRequestHandler(w http.ResponseWriter, r *http.Request) {
 
 func sendJSON(w http.ResponseWriter, v interface{}, maxAge time.Duration) {
 	addCacheHeaders(w, maxAge)
+	addCorsHeaders(w)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 
@@ -408,6 +413,7 @@ func sendJSON(w http.ResponseWriter, v interface{}, maxAge time.Duration) {
 
 func sendBinary(w http.ResponseWriter, v serializable, maxAge time.Duration) {
 	addCacheHeaders(w, maxAge)
+	addCorsHeaders(w)
 	w.WriteHeader(http.StatusOK)
 	err := v.Serialize(w)
 	if err != nil {
@@ -417,6 +423,7 @@ func sendBinary(w http.ResponseWriter, v serializable, maxAge time.Duration) {
 
 func sendRawBytes(w http.ResponseWriter, payload []byte, maxAge time.Duration) {
 	addCacheHeaders(w, maxAge)
+	addCorsHeaders(w)
 	w.WriteHeader(http.StatusOK)
 	_, err := w.Write(payload)
 	if err != nil {
@@ -437,6 +444,15 @@ func addCacheHeaders(w http.ResponseWriter, maxAge time.Duration) {
 		"Cache-Control",
 		fmt.Sprintf("max-age=%d", int64(maxAge.Seconds())),
 	)
+}
+
+// addCorsHeaders adds HTTP header fields that are required for Cross Origin
+// Resource Sharing. These header fields are needed to signal to the browser
+// that it's ok to allow requests to subdomains, even if the JS was served from
+// the top level domain.
+func addCorsHeaders(w http.ResponseWriter) {
+	w.Header().Add("Access-Control-Allow-Origin", "*")
+	w.Header().Add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 }
 
 func parseRequestParamInt64(r *http.Request, name string) (int64, error) {
