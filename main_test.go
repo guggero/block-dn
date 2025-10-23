@@ -169,7 +169,7 @@ func testTxOutProof(t *testing.T, ctx *testContext) {
 	require.NotEmpty(t, data)
 
 	require.Contains(t, headers, "Cache-Control")
-	require.Equal(t, "no-cache", headers.Get("Cache-Control"))
+	require.Equal(t, "max-age=1", headers.Get("Cache-Control"))
 
 	// Then we verify that a sufficiently confirmed block has cache headers.
 	buriedHash, err := ctx.backend.GetBlockHash(

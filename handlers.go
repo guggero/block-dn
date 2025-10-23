@@ -20,8 +20,9 @@ import (
 )
 
 var (
-	maxAgeMemory = time.Minute
-	maxAgeDisk   = time.Hour * 24 * 365
+	maxAgeTemporary = time.Second
+	maxAgeMemory    = time.Minute
+	maxAgeDisk      = time.Hour * 24 * 365
 
 	// importMetadataSize is the size of the metadata that is prepended to
 	// each imported file. It consists of 4 bytes (uint32 little endian) for
@@ -364,7 +365,7 @@ func (s *server) txOutProofRequestHandler(w http.ResponseWriter,
 	maxAge := maxAgeDisk
 	safeHeight := s.currentHeight.Load() - int32(s.reOrgSafeDepth)
 	if verboseHeader.Height > safeHeight {
-		maxAge = 0
+		maxAge = maxAgeTemporary
 	}
 
 	sendRawBytes(w, buf.Bytes(), maxAge)
