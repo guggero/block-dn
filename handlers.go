@@ -25,10 +25,10 @@ var (
 
 	// importMetadataSize is the size of the metadata that is prepended to
 	// each imported file. It consists of 4 bytes (uint32 little endian) for
-	// the Bitcoin network identifier, 1 byte for the file type (0 for block
-	// headers, 1 for compact filter headers) and 4 bytes (uint32 little
-	// endian) for the start header.
-	importMetadataSize = 4 + 1 + 4
+	// the Bitcoin network identifier, 1 byte for the version, 1 byte for
+	// the file type (0 for block headers, 1 for compact filter headers) and
+	// 4 bytes (uint32 little endian) for the start header.
+	importMetadataSize = 4 + 1 + 1 + 4
 
 	// typeBlockHeader is the byte value used to indicate that the file
 	// contains block headers.
@@ -40,6 +40,11 @@ var (
 
 	//go:embed index.html
 	indexHTML string
+)
+
+const (
+	// headerImportVersion is the current version of the import file format.
+	headerImportVersion = 0
 )
 
 type serializable interface {
@@ -75,8 +80,8 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 		BestBlockHeight:  bestHeight,
 		BestBlockHash:    bestBlock.String(),
 		BestFilterHeader: bestFilter.String(),
-		EntriesPerHeader: HeadersPerFile,
-		EntriesPerFilter: FiltersPerFile,
+		EntriesPerHeader: s.headersPerFile,
+		EntriesPerFilter: s.filtersPerFile,
 	}
 
 	sendJSON(w, status, maxAgeMemory)
@@ -85,7 +90,7 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 func (s *server) headersRequestHandler(w http.ResponseWriter, r *http.Request) {
 	s.heightBasedRequestHandler(
 		w, r, HeaderFileDir, HeaderFileNamePattern,
-		HeadersPerFile, s.serializeHeaders,
+		int64(s.headersPerFile), s.serializeHeaders,
 	)
 }
 
@@ -111,15 +116,15 @@ func (s *server) headersImportRequestHandler(w http.ResponseWriter,
 		return
 	}
 
-	if height == 0 || height%HeadersPerFile != 0 {
+	if height == 0 || height%int64(s.headersPerFile) != 0 {
 		sendBadRequest(w, fmt.Errorf("height %d must be a multiple of "+
-			"%d", height, HeadersPerFile))
+			"%d", height, s.headersPerFile))
 		return
 	}
 
 	s.heightBasedImportRequestHandler(
-		w, height, HeaderFileDir, HeaderFileNamePattern, HeadersPerFile,
-		s.serializeHeaders, typeBlockHeader,
+		w, height, HeaderFileDir, HeaderFileNamePattern,
+		int64(s.headersPerFile), s.serializeHeaders, typeBlockHeader,
 	)
 }
 
@@ -128,7 +133,7 @@ func (s *server) filterHeadersRequestHandler(w http.ResponseWriter,
 
 	s.heightBasedRequestHandler(
 		w, r, HeaderFileDir, FilterHeaderFileNamePattern,
-		HeadersPerFile, s.serializeFilterHeaders,
+		int64(s.headersPerFile), s.serializeFilterHeaders,
 	)
 }
 
@@ -154,22 +159,23 @@ func (s *server) filterHeadersImportRequestHandler(w http.ResponseWriter,
 		return
 	}
 
-	if height == 0 || height%HeadersPerFile != 0 {
+	if height == 0 || height%int64(s.headersPerFile) != 0 {
 		sendBadRequest(w, fmt.Errorf("height %d must be a multiple of "+
-			"%d", height, HeadersPerFile))
+			"%d", height, s.headersPerFile))
 		return
 	}
 
 	s.heightBasedImportRequestHandler(
 		w, height, HeaderFileDir, FilterHeaderFileNamePattern,
-		HeadersPerFile, s.serializeFilterHeaders, typeFilterHeader,
+		int64(s.headersPerFile), s.serializeFilterHeaders,
+		typeFilterHeader,
 	)
 }
 
 func (s *server) filtersRequestHandler(w http.ResponseWriter, r *http.Request) {
 	s.heightBasedRequestHandler(
-		w, r, FilterFileDir, FilterFileNamePattern, FiltersPerFile,
-		s.serializeFilters,
+		w, r, FilterFileDir, FilterFileNamePattern,
+		int64(s.filtersPerFile), s.serializeFilters,
 	)
 }
 
@@ -234,10 +240,11 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 
 	metadata := make([]byte, importMetadataSize)
 	binary.LittleEndian.PutUint32(metadata[0:4], uint32(s.chainParams.Net))
-	metadata[4] = fileType
+	metadata[4] = headerImportVersion
+	metadata[5] = fileType
 
 	// We always start at height 0 for the import.
-	binary.LittleEndian.PutUint32(metadata[5:9], 0)
+	binary.LittleEndian.PutUint32(metadata[6:10], 0)
 
 	if _, err := w.Write(metadata); err != nil {
 		log.Errorf("Error writing metadata: %v", err)
@@ -338,6 +345,13 @@ func (s *server) txOutProofRequestHandler(w http.ResponseWriter,
 		return
 	}
 
+	blockHash := merkleBlock.Header.BlockHash()
+	verboseHeader, err := s.chain.GetBlockHeaderVerbose(&blockHash)
+	if err != nil {
+		sendError(w, err)
+		return
+	}
+
 	var buf bytes.Buffer
 	err = merkleBlock.BtcEncode(
 		&buf, wire.ProtocolVersion, wire.WitnessEncoding,
@@ -347,7 +361,13 @@ func (s *server) txOutProofRequestHandler(w http.ResponseWriter,
 		return
 	}
 
-	sendRawBytes(w, buf.Bytes(), maxAgeDisk)
+	maxAge := maxAgeDisk
+	safeHeight := s.currentHeight.Load() - int32(s.reOrgSafeDepth)
+	if verboseHeader.Height > safeHeight {
+		maxAge = 0
+	}
+
+	sendRawBytes(w, buf.Bytes(), maxAge)
 }
 
 func (s *server) rawTxRequestHandler(w http.ResponseWriter, r *http.Request) {
@@ -404,6 +424,14 @@ func sendRawBytes(w http.ResponseWriter, payload []byte, maxAge time.Duration) {
 }
 
 func addCacheHeaders(w http.ResponseWriter, maxAge time.Duration) {
+	// A max-age of 0 means no caching at all, as something is not safe
+	// to cache yet.
+	if maxAge == 0 {
+		w.Header().Add("Cache-Control", "no-cache")
+
+		return
+	}
+
 	w.Header().Add(
 		"Cache-Control",
 		fmt.Sprintf("max-age=%d", int64(maxAge.Seconds())),

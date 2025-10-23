@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/rpcclient"
@@ -16,6 +17,9 @@ const (
 	version = "1.0.6"
 
 	defaultListenPort = 8080
+
+	defaultMainnetReOrgSafeDepth = 6
+	defaultTestnetReOrgSafeDepth = 100
 )
 
 var (
@@ -35,8 +39,11 @@ type mainCommand struct {
 	lightMode bool
 
 	baseDir string
+	logDir  string
 
 	listenAddr string
+
+	reOrgSafeDepth uint32
 
 	bitcoindConfig *rpcclient.ConnConfig
 	cmd            *cobra.Command
@@ -58,21 +65,45 @@ func main() {
 		Version: fmt.Sprintf("v%s, commit %s", version, Commit),
 		Run: func(_ *cobra.Command, _ []string) {
 			chainParams := &chaincfg.MainNetParams
+			headersPerFile := int32(DefaultHeadersPerFile)
+			filtersPerFile := int32(DefaultFiltersPerFile)
+
 			switch {
 			case cc.testnet:
 				chainParams = &chaincfg.TestNet3Params
 
+				// The test networks are more prone to longer
+				// re-orgs.
+				if cc.reOrgSafeDepth ==
+					defaultMainnetReOrgSafeDepth {
+
+					cc.reOrgSafeDepth =
+						defaultTestnetReOrgSafeDepth
+				}
+
 			case cc.testnet4:
 				chainParams = &chaincfg.TestNet4Params
+
+				// The test networks are more prone to longer
+				// re-orgs.
+				if cc.reOrgSafeDepth ==
+					defaultMainnetReOrgSafeDepth {
+
+					cc.reOrgSafeDepth =
+						defaultTestnetReOrgSafeDepth
+				}
 
 			case cc.signet:
 				chainParams = &chaincfg.SigNetParams
 
 			case cc.regtest:
 				chainParams = &chaincfg.RegressionNetParams
+
+				headersPerFile = DefaultRegtestHeadersPerFile
+				filtersPerFile = DefaultRegtestFiltersPerFile
 			}
 
-			setupLogging()
+			setupLogging(cc.logDir)
 			log.Infof("block-dn version v%s commit %s", version,
 				Commit)
 
@@ -85,6 +116,8 @@ func main() {
 			server := newServer(
 				cc.lightMode, cc.baseDir, cc.listenAddr,
 				cc.bitcoindConfig, chainParams,
+				cc.reOrgSafeDepth, headersPerFile,
+				filtersPerFile,
 			)
 			err := server.start()
 			if err != nil {
@@ -142,6 +175,10 @@ func main() {
 			"where the generated files will be stored",
 	)
 	cc.cmd.PersistentFlags().StringVar(
+		&cc.logDir, "log-dir", ".", "The log directory where the log "+
+			"file will be written",
+	)
+	cc.cmd.PersistentFlags().StringVar(
 		&cc.listenAddr, "listen-addr", cc.listenAddr, "The local "+
 			"host:port to listen on",
 	)
@@ -157,6 +194,12 @@ func main() {
 		&cc.bitcoindConfig.Pass, "bitcoind-pass", "",
 		"The RPC password of the bitcoind instance to connect to",
 	)
+	cc.cmd.PersistentFlags().Uint32VarP(
+		&cc.reOrgSafeDepth, "reorg-safe-depth", "",
+		defaultMainnetReOrgSafeDepth,
+		"The number of blocks to wait before considering a block "+
+			"safe from re-orgs",
+	)
 
 	if err := cc.cmd.Execute(); err != nil {
 		fmt.Printf("Error: %v", err)
@@ -165,7 +208,7 @@ func main() {
 	}
 }
 
-func setupLogging() {
+func setupLogging(logDir string) {
 	logConfig := build.DefaultLogConfig()
 	logWriter := build.NewRotatingLogWriter()
 	logMgr = build.NewSubLoggerManager(build.NewDefaultLogHandlers(
@@ -174,7 +217,9 @@ func setupLogging() {
 	log = build.NewSubLogger("BLDN", genSubLogger(logMgr))
 
 	setSubLogger("BLDN", log)
-	err := logWriter.InitLogRotator(logConfig.File, "./block-dn.log")
+	err := logWriter.InitLogRotator(
+		logConfig.File, filepath.Join(logDir, "block-dn.log"),
+	)
 	if err != nil {
 		panic(err)
 	}

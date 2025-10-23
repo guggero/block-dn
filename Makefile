@@ -38,7 +38,8 @@ endif
 
 DOCKER_TOOLS = docker run -v $$(pwd):/build block-dn-tools
 
-TEST_FLAGS = -test.timeout=20m
+TEST_TAGS := bitcoind
+TEST_FLAGS = -test.timeout=20m -tags="$(TEST_TAGS)"
 
 UNIT := $(GOLIST) | $(XARGS) env $(GOTEST) $(TEST_FLAGS)
 LDFLAGS := -X main.Commit=$(shell git describe --tags)
@@ -67,11 +68,6 @@ build:
 install:
 	@$(call print, "Installing block-dn.")
 	$(GOINSTALL) -ldflags "$(LDFLAGS)" ./...
-
-release:
-	@$(call print, "Creating release of block-dn.")
-	rm -rf block-dn-v*
-	./release.sh build-release "$(VERSION_TAG)" "$(BUILD_SYSTEM)" "$(RELEASE_LDFLAGS)"
 
 docker-tools:
 	@$(call print, "Building tools docker image.")
