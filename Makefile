@@ -36,7 +36,12 @@ ifneq ($(sys),)
 BUILD_SYSTEM = $(sys)
 endif
 
-DOCKER_TOOLS = docker run -v $$(pwd):/build block-dn-tools
+DOCKER_TOOLS = docker run \
+  --rm \
+  -v $(shell bash -c "go env GOCACHE || (mkdir -p /tmp/go-cache; echo /tmp/go-cache)"):/tmp/build/.cache \
+  -v $(shell bash -c "go env GOMODCACHE || (mkdir -p /tmp/go-modcache; echo /tmp/go-modcache)"):/tmp/build/.modcache \
+  -v $(shell bash -c "mkdir -p /tmp/go-lint-cache; echo /tmp/go-lint-cache"):/root/.cache/golangci-lint \
+  -v $$(pwd):/build block-dn-tools
 
 TEST_TAGS := bitcoind
 TEST_FLAGS = -test.timeout=20m -tags="$(TEST_TAGS)"
