@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,7 +26,13 @@ import (
 
 const (
 	numStartupBlocks = 100
-	numInitialBlocks = 7000
+
+	// numInitialBlocks is the number of blocks we mine for testing. In
+	// regtest mode, when using btcd as a miner, we can only mine blocks in
+	// a 2-hour window and each block needs to have a timestamp at least 1
+	// second greater than the previous block. Thus, we can only mine at
+	// most 7200 blocks in a short period of time.
+	numInitialBlocks = 1000
 )
 
 var (
@@ -72,6 +80,15 @@ func (ctx *testContext) fetchBinary(t *testing.T, endpoint string) ([]byte,
 
 	t.Helper()
 
+	data, header, _ := ctx.fetchBinaryWithStatus(t, endpoint)
+	return data, header
+}
+
+func (ctx *testContext) fetchBinaryWithStatus(t *testing.T,
+	endpoint string) ([]byte, http.Header, int) {
+
+	t.Helper()
+
 	url := fmt.Sprintf("http://%s/%s", ctx.server.listenAddr, endpoint)
 	resp, err := http.Get(url)
 	require.NoError(t, err)
@@ -84,7 +101,7 @@ func (ctx *testContext) fetchBinary(t *testing.T, endpoint string) ([]byte,
 	_, err = body.ReadFrom(resp.Body)
 	require.NoError(t, err)
 
-	return body.Bytes(), resp.Header
+	return body.Bytes(), resp.Header, resp.StatusCode
 }
 
 func (ctx *testContext) bestBlock(t *testing.T) (int32, chainhash.Hash) {
@@ -106,6 +123,10 @@ var testCases = []struct {
 	fn   testFunc
 }{
 	{
+		name: "errors",
+		fn:   testErrors,
+	},
+	{
 		name: "index",
 		fn:   testIndex,
 	},
@@ -121,6 +142,121 @@ var testCases = []struct {
 		name: "tx-raw",
 		fn:   testTxRaw,
 	},
+}
+
+func testErrors(t *testing.T, ctx *testContext) {
+	type errorResponse struct {
+		status int
+		error  string
+	}
+
+	var (
+		badHash       = strings.Repeat("k", 64)
+		badInt64      = strings.Repeat("9", 20)
+		badHeight     = strconv.Itoa(int(totalInitialBlocks + 1))
+		respBadHeight = errorResponse{
+			status: 400,
+			error:  "invalid value for parameter height",
+		}
+		respBadStartHeight1 = errorResponse{
+			status: 400,
+			error: fmt.Sprintf("invalid start height %d, must be "+
+				"zero or a multiple of %d", 1,
+				DefaultRegtestHeadersPerFile),
+		}
+		respBadStartHeightLarge = errorResponse{
+			status: 400,
+			error: fmt.Sprintf("start height %s is greater than "+
+				"current height %d", badHeight,
+				totalInitialBlocks),
+		}
+		respBadEndHeight0 = errorResponse{
+			status: 400,
+			error: fmt.Sprintf("invalid end height %d, must be "+
+				"a multiple of %d", 0,
+				DefaultRegtestHeadersPerFile),
+		}
+		respBadEndHeightLarge = errorResponse{
+			status: 400,
+			error: fmt.Sprintf("end height %s is greater than "+
+				"current height %d", badHeight,
+				totalInitialBlocks),
+		}
+		respBadHashLength = errorResponse{
+			status: 400,
+			error:  errInvalidHashLength.Error(),
+		}
+		respNotFound = errorResponse{
+			status: 404,
+			error:  "404 page not found",
+		}
+	)
+	errorCases := map[string]errorResponse{
+		"foo":                                respNotFound,
+		"headers":                            respNotFound,
+		"headers/" + badInt64:                respBadHeight,
+		"headers/1":                          respBadStartHeight1,
+		"headers/" + badHeight:               respBadStartHeightLarge,
+		"headers/import":                     respNotFound,
+		"headers/import/" + badInt64:         respBadHeight,
+		"headers/import/0":                   respBadEndHeight0,
+		"headers/import/" + badHeight:        respBadEndHeightLarge,
+		"filter-headers":                     respNotFound,
+		"filter-headers/" + badInt64:         respBadHeight,
+		"filter-headers/1":                   respBadStartHeight1,
+		"filter-headers/" + badHeight:        respBadStartHeightLarge,
+		"filter-headers/import":              respNotFound,
+		"filter-headers/import/" + badInt64:  respBadHeight,
+		"filter-headers/import/0":            respBadEndHeight0,
+		"filter-headers/import/" + badHeight: respBadEndHeightLarge,
+		"filters":                            respNotFound,
+		"filters/" + badInt64:                respBadHeight,
+		"filters/1":                          respBadStartHeight1,
+		"filters/" + badHeight:               respBadStartHeightLarge,
+		"block":                              respNotFound,
+		"block/aaaa":                         respBadHashLength,
+		"block/" + badHash:                   respNotFound,
+		"tx/out-proof":                       respNotFound,
+		"tx/out-proof/aaaa":                  respBadHashLength,
+		"tx/out-proof/" + badHash:            respNotFound,
+		"tx/raw":                             respNotFound,
+		"tx/raw/aaaa":                        respBadHashLength,
+		"tx/raw/" + badHash:                  respNotFound,
+	}
+	for endpoint, expected := range errorCases {
+		body, headers, status := ctx.fetchBinaryWithStatus(t, endpoint)
+		require.Equalf(
+			t, expected.status, status, "endpoint: %s", endpoint,
+		)
+
+		require.Containsf(
+			t, string(body), expected.error, "endpoint: %s",
+			endpoint,
+		)
+
+		// If the endpoint isn't found, there are no cache or CORS
+		// headers.
+		if expected.status == http.StatusNotFound {
+			continue
+		}
+
+		require.Equalf(
+			t, "*", headers.Get(HeaderCORS), "endpoint: %s",
+			endpoint,
+		)
+		require.Equalf(
+			t, "max-age=60", headers.Get(HeaderCache),
+			"endpoint: %s", endpoint,
+		)
+	}
+}
+
+func testIndex(t *testing.T, ctx *testContext) {
+	data, headers := ctx.fetchBinary(t, "")
+	require.Contains(
+		t, string(data), "<title>Block Delivery Network</title>",
+	)
+	require.Equal(t, "*", headers.Get(HeaderCORS))
 }
 
 func testStatus(t *testing.T, ctx *testContext) {
@@ -139,21 +275,13 @@ func testStatus(t *testing.T, ctx *testContext) {
 		t, ctx.server.filtersPerFile, status.EntriesPerFilter,
 	)
 
-	require.Contains(t, headers, "Cache-Control")
-	require.Equal(t, "max-age=60", headers.Get("Cache-Control"))
-	require.Equal(t, "*", headers.Get("Access-Control-Allow-Origin"))
+	require.Contains(t, headers, HeaderCache)
+	require.Equal(t, "max-age=60", headers.Get(HeaderCache))
+	require.Equal(t, "*", headers.Get(HeaderCORS))
 
 	height, blockHash := ctx.bestBlock(t)
 	require.Equal(t, height, status.BestBlockHeight)
 	require.Equal(t, blockHash.String(), status.BestBlockHash)
-}
-
-func testIndex(t *testing.T, ctx *testContext) {
-	data, headers := ctx.fetchBinary(t, "")
-	require.Contains(
-		t, string(data), "<title>Block Delivery Network</title>",
-	)
-	require.Equal(t, "*", headers.Get("Access-Control-Allow-Origin"))
 }
 
 func testTxOutProof(t *testing.T, ctx *testContext) {
@@ -170,9 +298,9 @@ func testTxOutProof(t *testing.T, ctx *testContext) {
 	)
 	require.NotEmpty(t, data)
 
-	require.Contains(t, headers, "Cache-Control")
-	require.Equal(t, "max-age=1", headers.Get("Cache-Control"))
-	require.Equal(t, "*", headers.Get("Access-Control-Allow-Origin"))
+	require.Contains(t, headers, HeaderCache)
+	require.Equal(t, "max-age=1", headers.Get(HeaderCache))
+	require.Equal(t, "*", headers.Get(HeaderCORS))
 
 	// Then we verify that a sufficiently confirmed block has cache headers.
 	buriedHash, err := ctx.backend.GetBlockHash(
@@ -191,9 +319,9 @@ func testTxOutProof(t *testing.T, ctx *testContext) {
 	)
 	require.NotEmpty(t, data)
 
-	require.Contains(t, headers, "Cache-Control")
-	require.Equal(t, "max-age=31536000", headers.Get("Cache-Control"))
-	require.Equal(t, "*", headers.Get("Access-Control-Allow-Origin"))
+	require.Contains(t, headers, HeaderCache)
+	require.Equal(t, "max-age=31536000", headers.Get(HeaderCache))
+	require.Equal(t, "*", headers.Get(HeaderCORS))
 }
 
 func testTxRaw(t *testing.T, ctx *testContext) {
@@ -214,9 +342,9 @@ func testTxRaw(t *testing.T, ctx *testContext) {
 
 	require.Equal(t, txBuf.Bytes(), data)
 
-	require.Contains(t, headers, "Cache-Control")
-	require.Equal(t, "max-age=31536000", headers.Get("Cache-Control"))
-	require.Equal(t, "*", headers.Get("Access-Control-Allow-Origin"))
+	require.Contains(t, headers, HeaderCache)
+	require.Equal(t, "max-age=31536000", headers.Get(HeaderCache))
+	require.Equal(t, "*", headers.Get(HeaderCORS))
 }
 
 func TestBlockDN(t *testing.T) {

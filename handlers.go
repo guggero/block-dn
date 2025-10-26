@@ -77,6 +77,10 @@ const (
 	// headerImportVersion is the current version of the import file format.
 	headerImportVersion = 0
 
+	HeaderCache       = "Cache-Control"
+	HeaderCORS        = "Access-Control-Allow-Origin"
+	HeaderCORSMethods = "Access-Control-Allow-Methods"
+
 	status400 = http.StatusBadRequest
 	status500 = http.StatusInternalServerError
 	status503 = http.StatusServiceUnavailable
@@ -490,14 +494,13 @@ func addCacheHeaders(w http.ResponseWriter, maxAge time.Duration) {
 	// A max-age of 0 means no caching at all, as something is not safe
 	// to cache yet.
 	if maxAge == 0 {
-		w.Header().Add("Cache-Control", "no-cache")
+		w.Header().Add(HeaderCache, "no-cache")
 
 		return
 	}
 
 	w.Header().Add(
-		"Cache-Control",
-		fmt.Sprintf("max-age=%d", int64(maxAge.Seconds())),
+		HeaderCache, fmt.Sprintf("max-age=%d", int64(maxAge.Seconds())),
 	)
 }
 
@@ -506,8 +509,8 @@ func addCacheHeaders(w http.ResponseWriter, maxAge time.Duration) {
 // that it's ok to allow requests to subdomains, even if the JS was served from
 // the top level domain.
 func addCorsHeaders(w http.ResponseWriter) {
-	w.Header().Add("Access-Control-Allow-Origin", "*")
-	w.Header().Add("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Add(HeaderCORS, "*")
+	w.Header().Add(HeaderCORSMethods, "GET, POST, OPTIONS")
 }
 
 func parseRequestParamInt64(r *http.Request, name string) (int64, error) {
