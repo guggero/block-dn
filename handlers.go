@@ -46,6 +46,12 @@ var (
 		"endpoint not available in light mode",
 	)
 
+	// errStillStartingUp is an error indicating that the server is still
+	// starting up and not ready to serve requests yet.
+	errStillStartingUp = errors.New(
+		"server still starting up, please try again later",
+	)
+
 	// errInvalidSyncStatus is an error indicating that the sync status is
 	// invalid, caused by a bad configuration or unexpected behavior of the
 	// backend.
@@ -199,6 +205,11 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 		return
 	}
 
+	if !s.startupComplete.Load() {
+		sendError(w, status503, errStillStartingUp)
+		return
+	}
+
 	startHeight, err := parseRequestParamInt64(r, "height")
 	if err != nil {
 		sendError(w, status400, err)
@@ -255,6 +266,11 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 	// These kinds of requests aren't available in light mode.
 	if s.lightMode {
 		sendError(w, status503, errUnavailableInLightMode)
+		return
+	}
+
+	if !s.startupComplete.Load() {
+		sendError(w, status503, errStillStartingUp)
 		return
 	}
 

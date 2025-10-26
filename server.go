@@ -38,9 +38,10 @@ type server struct {
 	router         *mux.Router
 	httpServer     *http.Server
 
-	headersPerFile int32
-	filtersPerFile int32
-	currentHeight  atomic.Int32
+	headersPerFile  int32
+	filtersPerFile  int32
+	startupComplete atomic.Bool
+	currentHeight   atomic.Int32
 
 	heightToHash  map[int32]chainhash.Hash
 	headers       map[chainhash.Hash]*wire.BlockHeader
@@ -222,6 +223,9 @@ func (s *server) updateFiles() error {
 	if err != nil {
 		return fmt.Errorf("error updating blocks: %w", err)
 	}
+
+	// Allow serving requests now that we're caught up.
+	s.startupComplete.Store(true)
 
 	// Let's now go into the infinite loop of updating the filter files
 	// whenever a new block is mined.
