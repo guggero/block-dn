@@ -80,6 +80,36 @@ type serializable interface {
 	Serialize(w io.Writer) error
 }
 
+func (s *server) createRouter() *mux.Router {
+	router := mux.NewRouter()
+	router.HandleFunc("/", s.indexRequestHandler)
+	router.HandleFunc("/index.html", s.indexRequestHandler)
+	router.HandleFunc("/status", s.statusRequestHandler)
+	router.HandleFunc("/headers/{height:[0-9]+}", s.headersRequestHandler)
+	router.HandleFunc(
+		"/headers/import/{height:[0-9]+}",
+		s.headersImportRequestHandler,
+	)
+	router.HandleFunc(
+		"/filter-headers/{height:[0-9]+}",
+		s.filterHeadersRequestHandler,
+	)
+	router.HandleFunc(
+		"/filter-headers/import/{height:[0-9]+}",
+		s.filterHeadersImportRequestHandler,
+	)
+	router.HandleFunc("/filters/{height:[0-9]+}", s.filtersRequestHandler)
+	router.HandleFunc("/block/{hash:[0-9a-f]+}", s.blockRequestHandler)
+	router.HandleFunc(
+		"/tx/out-proof/{txid:[0-9a-f]+}", s.txOutProofRequestHandler,
+	)
+	router.HandleFunc(
+		"/tx/raw/{txid:[0-9a-f]+}", s.rawTxRequestHandler,
+	)
+
+	return router
+}
+
 func (s *server) indexRequestHandler(w http.ResponseWriter, _ *http.Request) {
 	addCorsHeaders(w)
 	w.Header().Set("Content-Type", "text/html")
