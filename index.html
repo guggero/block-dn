@@ -148,11 +148,13 @@
                 <td>
                     Returns a binary file containing <code>end_block</code>
                     block headers, for import directly into a Neutrino database.
-                    The file starts with the 9 byte metadata header (4 bytes
-                    Bitcoin network identifier, 1 byte header type, 4 byte
-                    start header height), followed by the headers serialized as
-                    80 bytes per header. <code>end_block</code> must be
-                    divisible by 100'000!
+                    The file starts with the 10 byte metadata header (4 bytes
+                    Bitcoin network identifier, 1 byte import format version,
+                    1 byte header type, 4 byte start header height), followed by
+                    the headers serialized as 80 bytes per header.<br/>
+                    <code>end_block</code> must be divisible by 100'000 and is
+                    non-inclusive, meaning all blocks up to but not including
+                    the <code>end_block</code> are returned!
                 </td>
                 <td>
                     <a href="https://block-dn.org/headers/import/200000">
@@ -178,11 +180,14 @@
                 <td>
                     Returns a binary file containing <code>end_block</code>
                     compact filter headers, for import directly into a Neutrino
-                    database. The file starts with the 9 byte metadata header
-                    (4 bytes Bitcoin network identifier, 1 byte header type,
-                    4 byte start header height), followed by the filter header
-                    hash serialized as 32 bytes per header hash.
-                    <code>end_block</code> must be divisible by 100'000!
+                    database. The file starts with the 10 byte metadata header
+                    (4 bytes Bitcoin network identifier, 1 byte import format
+                    version, 1 byte header type, 4 byte start header height),
+                    followed by the filter header hashes serialized as 32 bytes
+                    per header hash.<br/>
+                    <code>end_block</code> must be divisible by 100'000 and is
+                    non-inclusive, meaning all blocks up to but not including
+                    the <code>end_block</code> are returned!
                 </td>
                 <td>
                     <a href="https://block-dn.org/filter-headers/import/200000">

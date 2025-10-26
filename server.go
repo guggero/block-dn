@@ -38,9 +38,10 @@ type server struct {
 	router         *mux.Router
 	httpServer     *http.Server
 
-	headersPerFile int32
-	filtersPerFile int32
-	currentHeight  atomic.Int32
+	headersPerFile  int32
+	filtersPerFile  int32
+	startupComplete atomic.Bool
+	currentHeight   atomic.Int32
 
 	heightToHash  map[int32]chainhash.Hash
 	headers       map[chainhash.Hash]*wire.BlockHeader
@@ -82,33 +83,7 @@ func newServer(lightMode bool, baseDir, listenAddr string,
 		quit: make(chan struct{}),
 	}
 
-	router := mux.NewRouter()
-	router.HandleFunc("/", s.indexRequestHandler)
-	router.HandleFunc("/index.html", s.indexRequestHandler)
-	router.HandleFunc("/status", s.statusRequestHandler)
-	router.HandleFunc("/headers/{height:[0-9]+}", s.headersRequestHandler)
-	router.HandleFunc(
-		"/headers/import/{height:[0-9]+}",
-		s.headersImportRequestHandler,
-	)
-	router.HandleFunc(
-		"/filter-headers/{height:[0-9]+}",
-		s.filterHeadersRequestHandler,
-	)
-	router.HandleFunc(
-		"/filter-headers/import/{height:[0-9]+}",
-		s.filterHeadersImportRequestHandler,
-	)
-	router.HandleFunc("/filters/{height:[0-9]+}", s.filtersRequestHandler)
-	router.HandleFunc("/block/{hash:[0-9a-f]+}", s.blockRequestHandler)
-	router.HandleFunc(
-		"/tx/out-proof/{txid:[0-9a-f]+}", s.txOutProofRequestHandler,
-	)
-	router.HandleFunc(
-		"/tx/raw/{txid:[0-9a-f]+}", s.rawTxRequestHandler,
-	)
-
-	s.router = router
+	s.router = s.createRouter()
 
 	return s
 }
@@ -248,6 +223,9 @@ func (s *server) updateFiles() error {
 	if err != nil {
 		return fmt.Errorf("error updating blocks: %w", err)
 	}
+
+	// Allow serving requests now that we're caught up.
+	s.startupComplete.Store(true)
 
 	// Let's now go into the infinite loop of updating the filter files
 	// whenever a new block is mined.

@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	version = "1.0.6"
+	version = "1.1.3"
 
 	defaultListenPort = 8080
 
@@ -38,8 +38,9 @@ type mainCommand struct {
 
 	lightMode bool
 
-	baseDir string
-	logDir  string
+	baseDir   string
+	logDir    string
+	indexPage string
 
 	listenAddr string
 
@@ -50,6 +51,13 @@ type mainCommand struct {
 }
 
 func main() {
+	workDir, err := os.Getwd()
+	if err != nil {
+		fmt.Printf("Error: %v", err)
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
 	cc := &mainCommand{
 		listenAddr: fmt.Sprintf("localhost:%d", defaultListenPort),
 		bitcoindConfig: &rpcclient.ConnConfig{
@@ -111,6 +119,18 @@ func main() {
 				log.Errorf("Base directory must be set if " +
 					"not running in light mode")
 				return
+			}
+
+			if cc.indexPage != "" {
+				pageContent, err := os.ReadFile(cc.indexPage)
+				if err != nil {
+					log.Errorf("Error reading index page "+
+						"file '%s': %v", cc.indexPage,
+						err)
+					return
+				}
+
+				indexHTML = string(pageContent)
 			}
 
 			server := newServer(
@@ -175,8 +195,13 @@ func main() {
 			"where the generated files will be stored",
 	)
 	cc.cmd.PersistentFlags().StringVar(
-		&cc.logDir, "log-dir", ".", "The log directory where the log "+
-			"file will be written",
+		&cc.logDir, "log-dir", workDir, "The log directory where the "+
+			"log file will be written",
+	)
+	cc.cmd.PersistentFlags().StringVar(
+		&cc.indexPage, "index-page", "", "Full path to the index.html "+
+			"that should be used instead of the default one that "+
+			"comes with the project",
 	)
 	cc.cmd.PersistentFlags().StringVar(
 		&cc.listenAddr, "listen-addr", cc.listenAddr, "The local "+
