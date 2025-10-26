@@ -50,6 +50,13 @@ type mainCommand struct {
 }
 
 func main() {
+	workDir, err := os.Getwd()
+	if err != nil {
+		fmt.Printf("Error: %v", err)
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
 	cc := &mainCommand{
 		listenAddr: fmt.Sprintf("localhost:%d", defaultListenPort),
 		bitcoindConfig: &rpcclient.ConnConfig{
@@ -175,8 +182,9 @@ func main() {
 			"where the generated files will be stored",
 	)
 	cc.cmd.PersistentFlags().StringVar(
-		&cc.logDir, "log-dir", ".", "The log directory where the log "+
-			"file will be written",
+		&cc.logDir, "log-dir", workDir, "The log directory where the "+
+			"log file will be written",
+	)
 	)
 	cc.cmd.PersistentFlags().StringVar(
 		&cc.listenAddr, "listen-addr", cc.listenAddr, "The local "+
