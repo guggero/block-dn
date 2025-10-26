@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -39,6 +40,29 @@ var (
 	// contains compact filter headers.
 	typeFilterHeader = byte(1)
 
+	// errUnavailableInLightMode is an error indicating that a certain HTTP
+	// endpoint isn't available when running in light mode.
+	errUnavailableInLightMode = errors.New(
+		"endpoint not available in light mode",
+	)
+
+	// errInvalidSyncStatus is an error indicating that the sync status is
+	// invalid, caused by a bad configuration or unexpected behavior of the
+	// backend.
+	errInvalidSyncStatus = errors.New("invalid sync status")
+
+	// errInvalidHashLength is an error indicating that the provided hash
+	// length is invalid.
+	errInvalidHashLength = errors.New("invalid hash length")
+
+	// errInvalidBlockHash is an error indicating that the provided block
+	// hash is invalid.
+	errInvalidBlockHash = errors.New("invalid block hash")
+
+	// errInvalidTxHash is an error indicating that the provided transaction
+	// hash is invalid.
+	errInvalidTxHash = errors.New("invalid transaction hash")
+
 	//go:embed index.html
 	indexHTML string
 )
@@ -46,6 +70,10 @@ var (
 const (
 	// headerImportVersion is the current version of the import file format.
 	headerImportVersion = 0
+
+	status400 = http.StatusBadRequest
+	status500 = http.StatusInternalServerError
+	status503 = http.StatusServiceUnavailable
 )
 
 type serializable interface {
@@ -66,13 +94,13 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 	bestHeight := s.currentHeight.Load()
 	bestBlock, ok := s.heightToHash[bestHeight]
 	if !ok {
-		sendError(w, fmt.Errorf("invalid sync status"))
+		sendError(w, status500, errInvalidSyncStatus)
 		return
 	}
 
 	bestFilter, ok := s.filterHeaders[bestBlock]
 	if !ok {
-		sendError(w, fmt.Errorf("invalid sync status"))
+		sendError(w, status500, errInvalidSyncStatus)
 		return
 	}
 
@@ -99,34 +127,9 @@ func (s *server) headersRequestHandler(w http.ResponseWriter, r *http.Request) {
 func (s *server) headersImportRequestHandler(w http.ResponseWriter,
 	r *http.Request) {
 
-	// These kinds of requests aren't available in light mode.
-	if s.lightMode {
-		sendUnavailable(w, fmt.Errorf("endpoint not available in "+
-			"light mode"))
-		return
-	}
-
-	height, err := parseRequestParamInt64(r, "height")
-	if err != nil {
-		sendBadRequest(w, err)
-		return
-	}
-
-	if int32(height) > s.currentHeight.Load() {
-		sendBadRequest(w, fmt.Errorf("height %d is greater than "+
-			"current height %d", height, s.currentHeight.Load()))
-		return
-	}
-
-	if height == 0 || height%int64(s.headersPerFile) != 0 {
-		sendBadRequest(w, fmt.Errorf("height %d must be a multiple of "+
-			"%d", height, s.headersPerFile))
-		return
-	}
-
 	s.heightBasedImportRequestHandler(
-		w, height, HeaderFileDir, HeaderFileNamePattern,
-		int64(s.headersPerFile), s.serializeHeaders, typeBlockHeader,
+		w, r, HeaderFileDir, HeaderFileNamePattern,
+		s.headersPerFile, s.serializeHeaders, typeBlockHeader,
 	)
 }
 
@@ -142,34 +145,9 @@ func (s *server) filterHeadersRequestHandler(w http.ResponseWriter,
 func (s *server) filterHeadersImportRequestHandler(w http.ResponseWriter,
 	r *http.Request) {
 
-	// These kinds of requests aren't available in light mode.
-	if s.lightMode {
-		sendUnavailable(w, fmt.Errorf("endpoint not available in "+
-			"light mode"))
-		return
-	}
-
-	height, err := parseRequestParamInt64(r, "height")
-	if err != nil {
-		sendBadRequest(w, err)
-		return
-	}
-
-	if int32(height) > s.currentHeight.Load() {
-		sendBadRequest(w, fmt.Errorf("height %d is greater than "+
-			"current height %d", height, s.currentHeight.Load()))
-		return
-	}
-
-	if height == 0 || height%int64(s.headersPerFile) != 0 {
-		sendBadRequest(w, fmt.Errorf("height %d must be a multiple of "+
-			"%d", height, s.headersPerFile))
-		return
-	}
-
 	s.heightBasedImportRequestHandler(
-		w, height, HeaderFileDir, FilterHeaderFileNamePattern,
-		int64(s.headersPerFile), s.serializeFilterHeaders,
+		w, r, HeaderFileDir, FilterHeaderFileNamePattern,
+		s.headersPerFile, s.serializeFilterHeaders,
 		typeFilterHeader,
 	)
 }
@@ -182,26 +160,31 @@ func (s *server) filtersRequestHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
-	r *http.Request, subDir, fileNamePattern string,
-	numEntriesPerFile int64, serializeCb func(w io.Writer, startIndex,
-		endIndex int32) error) {
+	r *http.Request, subDir, fileNamePattern string, entriesPerFile int64,
+	serializeCb func(w io.Writer, startIndex, endIndex int32) error) {
 
 	// These kinds of requests aren't available in light mode.
 	if s.lightMode {
-		sendUnavailable(w, fmt.Errorf("endpoint not available in "+
-			"light mode"))
+		sendError(w, status503, errUnavailableInLightMode)
 		return
 	}
 
-	height, err := parseRequestParamInt64(r, "height")
+	startHeight, err := parseRequestParamInt64(r, "height")
 	if err != nil {
-		sendBadRequest(w, err)
+		sendError(w, status400, err)
+		return
+	}
+
+	err = s.checkStartHeight(startHeight, int32(entriesPerFile))
+	if err != nil {
+		sendError(w, status400, err)
 		return
 	}
 
 	srcDir := filepath.Join(s.baseDir, subDir)
 	fileName := fmt.Sprintf(
-		fileNamePattern, srcDir, height, height+numEntriesPerFile-1,
+		fileNamePattern, srcDir, startHeight,
+		startHeight+entriesPerFile-1,
 	)
 	if fileExists(fileName) {
 		addCorsHeaders(w)
@@ -209,7 +192,7 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 		w.WriteHeader(http.StatusOK)
 		if err := streamFile(w, fileName); err != nil {
 			log.Errorf("Error while streaming file: %v", err)
-			sendError(w, err)
+			sendError(w, status500, err)
 		}
 
 		return
@@ -218,8 +201,8 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 	s.cacheLock.RLock()
 	defer s.cacheLock.RUnlock()
 
-	if _, ok := s.heightToHash[int32(height)]; !ok {
-		sendBadRequest(w, fmt.Errorf("invalid height"))
+	if _, ok := s.heightToHash[int32(startHeight)]; !ok {
+		sendError(w, status400, fmt.Errorf("invalid height"))
 		return
 	}
 
@@ -228,16 +211,33 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 	addCorsHeaders(w)
 	addCacheHeaders(w, maxAgeMemory)
 	w.WriteHeader(http.StatusOK)
-	err = serializeCb(w, int32(height), s.currentHeight.Load())
+	err = serializeCb(w, int32(startHeight), s.currentHeight.Load())
 	if err != nil {
 		log.Errorf("Error serializing: %v", err)
 	}
 }
 
 func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
-	height int64, subDir, fileNamePattern string, numEntriesPerFile int64,
+	r *http.Request, subDir, fileNamePattern string, entriesPerFile int32,
 	serializeCb func(w io.Writer, startIndex, endIndex int32) error,
 	fileType byte) {
+
+	// These kinds of requests aren't available in light mode.
+	if s.lightMode {
+		sendError(w, status503, errUnavailableInLightMode)
+		return
+	}
+
+	endHeight, err := parseRequestParamInt64(r, "height")
+	if err != nil {
+		sendError(w, status400, err)
+		return
+	}
+
+	if err := s.checkEndHeight(endHeight, entriesPerFile); err != nil {
+		sendError(w, status400, err)
+		return
+	}
 
 	addCorsHeaders(w)
 	addCacheHeaders(w, maxAgeDisk)
@@ -260,67 +260,60 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 		startHeight = int64(0)
 		lastHeight  = int64(-1)
 	)
-	for ; startHeight <= height; startHeight += numEntriesPerFile {
+	for ; startHeight <= endHeight; startHeight += int64(entriesPerFile) {
 		// We always start at 0, so we'll always have one entry less
 		// in the files than the even height we require the user to
 		// enter.
 		// TODO(guggero): Allow returning any range, even if that would
 		// mean returning a partial file.
-		if startHeight == height {
+		if startHeight == endHeight {
 			return
 		}
 
 		srcDir := filepath.Join(s.baseDir, subDir)
 		fileName := fmt.Sprintf(
 			fileNamePattern, srcDir, startHeight,
-			startHeight+numEntriesPerFile-1,
+			startHeight+int64(entriesPerFile)-1,
 		)
 
 		if !fileExists(fileName) {
 			break
 		}
 
-		lastHeight = startHeight + numEntriesPerFile - 1
+		lastHeight = startHeight + int64(entriesPerFile) - 1
 		if err := streamFile(w, fileName); err != nil {
 			log.Errorf("Error while streaming file: %v", err)
-			sendError(w, err)
+			sendError(w, status500, err)
 		}
 	}
 
 	s.cacheLock.RLock()
 	defer s.cacheLock.RUnlock()
 
-	if _, ok := s.heightToHash[int32(height)]; !ok {
-		sendBadRequest(w, fmt.Errorf("invalid height"))
+	if _, ok := s.heightToHash[int32(endHeight)]; !ok {
+		sendError(w, status400, fmt.Errorf("invalid height"))
 		return
 	}
 
 	// The requested start height wasn't yet in a file, so we need to
 	// stream the headers from memory.
-	err := serializeCb(w, int32(lastHeight+1), int32(height))
+	err = serializeCb(w, int32(lastHeight+1), int32(endHeight))
 	if err != nil {
 		log.Errorf("Error serializing: %v", err)
 	}
 }
 
 func (s *server) blockRequestHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	blockHash := vars["hash"]
-
-	if len(blockHash) != hex.EncodedLen(chainhash.HashSize) {
-		sendBadRequest(w, fmt.Errorf("invalid block hash"))
+	blockHash, err := parseRequestParamChainHash(r, "hash")
+	if err != nil {
+		sendError(w, status400, fmt.Errorf("%w: %w",
+			errInvalidBlockHash, err))
 		return
 	}
 
-	hash, err := chainhash.NewHashFromStr(blockHash)
+	block, err := s.chain.GetBlock(blockHash)
 	if err != nil {
-		sendBadRequest(w, err)
-		return
-	}
-
-	block, err := s.chain.GetBlock(hash)
-	if err != nil {
-		sendError(w, err)
+		sendError(w, status500, err)
 		return
 	}
 
@@ -330,30 +323,25 @@ func (s *server) blockRequestHandler(w http.ResponseWriter, r *http.Request) {
 func (s *server) txOutProofRequestHandler(w http.ResponseWriter,
 	r *http.Request) {
 
-	vars := mux.Vars(r)
-	txid := vars["txid"]
-
-	if len(txid) != hex.EncodedLen(chainhash.HashSize) {
-		sendBadRequest(w, fmt.Errorf("invalid transaction hash"))
+	txHash, err := parseRequestParamChainHash(r, "txid")
+	if err != nil {
+		sendError(w, status400, fmt.Errorf("%w: %w", errInvalidTxHash,
+			err))
 		return
 	}
 
-	hash, err := chainhash.NewHashFromStr(txid)
+	merkleBlock, err := s.chain.GetTxOutProof(
+		[]string{txHash.String()}, nil,
+	)
 	if err != nil {
-		sendBadRequest(w, err)
-		return
-	}
-
-	merkleBlock, err := s.chain.GetTxOutProof([]string{hash.String()}, nil)
-	if err != nil {
-		sendError(w, err)
+		sendError(w, status500, err)
 		return
 	}
 
 	blockHash := merkleBlock.Header.BlockHash()
 	verboseHeader, err := s.chain.GetBlockHeaderVerbose(&blockHash)
 	if err != nil {
-		sendError(w, err)
+		sendError(w, status500, err)
 		return
 	}
 
@@ -362,7 +350,7 @@ func (s *server) txOutProofRequestHandler(w http.ResponseWriter,
 		&buf, wire.ProtocolVersion, wire.WitnessEncoding,
 	)
 	if err != nil {
-		sendError(w, err)
+		sendError(w, status500, err)
 		return
 	}
 
@@ -376,27 +364,48 @@ func (s *server) txOutProofRequestHandler(w http.ResponseWriter,
 }
 
 func (s *server) rawTxRequestHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	txid := vars["txid"]
-
-	if len(txid) != hex.EncodedLen(chainhash.HashSize) {
-		sendBadRequest(w, fmt.Errorf("invalid transaction hash"))
+	txHash, err := parseRequestParamChainHash(r, "txid")
+	if err != nil {
+		sendError(w, status400, fmt.Errorf("%w: %w", errInvalidTxHash,
+			err))
 		return
 	}
 
-	hash, err := chainhash.NewHashFromStr(txid)
+	tx, err := s.chain.GetRawTransaction(txHash)
 	if err != nil {
-		sendBadRequest(w, err)
-		return
-	}
-
-	tx, err := s.chain.GetRawTransaction(hash)
-	if err != nil {
-		sendError(w, err)
+		sendError(w, status500, err)
 		return
 	}
 
 	sendBinary(w, tx.MsgTx(), maxAgeDisk)
+}
+
+func (s *server) checkStartHeight(height int64, entriesPerFile int32) error {
+	if int32(height) > s.currentHeight.Load() {
+		return fmt.Errorf("start height %d is greater than current "+
+			"height %d", height, s.currentHeight.Load())
+	}
+
+	if height != 0 && height%int64(entriesPerFile) != 0 {
+		return fmt.Errorf("invalid start height %d, must be zero or "+
+			"a multiple of %d", height, entriesPerFile)
+	}
+
+	return nil
+}
+
+func (s *server) checkEndHeight(height int64, entriesPerFile int32) error {
+	if int32(height) > s.currentHeight.Load() {
+		return fmt.Errorf("end height %d is greater than current "+
+			"height %d", height, s.currentHeight.Load())
+	}
+
+	if height == 0 || height%int64(entriesPerFile) != 0 {
+		return fmt.Errorf("invalid end height %d, must be a multiple "+
+			"of %d", height, entriesPerFile)
+	}
+
+	return nil
 }
 
 func sendJSON(w http.ResponseWriter, v interface{}, maxAge time.Duration) {
@@ -471,18 +480,36 @@ func parseRequestParamInt64(r *http.Request, name string) (int64, error) {
 	return paramValue, nil
 }
 
-func sendUnavailable(w http.ResponseWriter, err error) {
-	w.WriteHeader(http.StatusServiceUnavailable)
-	_, _ = w.Write([]byte(err.Error()))
+func parseRequestParamChainHash(r *http.Request, name string) (*chainhash.Hash,
+	error) {
+
+	vars := mux.Vars(r)
+	blockHash := vars[name]
+
+	if len(blockHash) != hex.EncodedLen(chainhash.HashSize) {
+		return nil, errInvalidHashLength
+	}
+
+	hash, err := chainhash.NewHashFromStr(blockHash)
+	if err != nil {
+		return nil, err
+	}
+
+	return hash, nil
 }
 
-func sendBadRequest(w http.ResponseWriter, err error) {
-	w.WriteHeader(http.StatusBadRequest)
-	_, _ = w.Write([]byte(err.Error()))
-}
+func sendError(w http.ResponseWriter, status int, err error) {
+	// By default, we don't cache error responses.
+	cache := time.Duration(0)
 
-func sendError(w http.ResponseWriter, err error) {
-	w.WriteHeader(http.StatusInternalServerError)
+	// But if it's a user error (4xx), we can cache it for a short time.
+	if status >= 400 && status < 500 {
+		cache = maxAgeMemory
+	}
+
+	addCacheHeaders(w, cache)
+	addCorsHeaders(w)
+	w.WriteHeader(status)
 	_, _ = w.Write([]byte(err.Error()))
 }
 
