@@ -289,8 +289,36 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 		return
 	}
 
+	// We allow the end height to be equal to the current height, which
+	// we serve content from memory. In that case we mark the whole file as
+	// short-term cacheable only.
+	cache := maxAgeMemory
+
+	// We also check that we don't need to server partial content from
+	// files, as that would make things a bit more tricky.
+	maxCacheFileEndHeight := int64(
+		(s.currentHeight.Load() / entriesPerFile) * entriesPerFile,
+	)
+
+	// We don't want to return partial files. So for any range that can be
+	// served only from files (i.e. up to the last complete cache file), we
+	// require the end height to be a multiple of the entries per file.
+	if endHeight <= maxCacheFileEndHeight {
+		// We're in the file-only range, so we can set the cache
+		// duration to disk cache time.
+		cache = maxAgeDisk
+
+		// Make sure we'll be able to serve a full cache file.
+		if endHeight%int64(entriesPerFile) != 0 {
+			err = fmt.Errorf("invalid end height %d, must be a "+
+				"multiple of %d", endHeight, entriesPerFile)
+			sendError(w, status400, err)
+			return
+		}
+	}
+
 	addCorsHeaders(w)
-	addCacheHeaders(w, maxAgeDisk)
+	addCacheHeaders(w, cache)
 	w.WriteHeader(http.StatusOK)
 
 	metadata := make([]byte, importMetadataSize)
@@ -306,31 +334,26 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 		return
 	}
 
-	var (
-		startHeight = int64(0)
-		lastHeight  = int64(-1)
-	)
-	for ; startHeight <= endHeight; startHeight += int64(entriesPerFile) {
+	// lastHeight is the beginning block of each cache file.
+	lastHeight := int64(0)
+	for ; lastHeight <= endHeight; lastHeight += int64(entriesPerFile) {
 		// We always start at 0, so we'll always have one entry less
 		// in the files than the even height we require the user to
-		// enter.
-		// TODO(guggero): Allow returning any range, even if that would
-		// mean returning a partial file.
-		if startHeight == endHeight {
+		// enter (non-inclusive, as described in the API docs).
+		if lastHeight == endHeight {
 			return
 		}
 
 		srcDir := filepath.Join(s.baseDir, subDir)
 		fileName := fmt.Sprintf(
-			fileNamePattern, srcDir, startHeight,
-			startHeight+int64(entriesPerFile)-1,
+			fileNamePattern, srcDir, lastHeight,
+			lastHeight+int64(entriesPerFile)-1,
 		)
 
 		if !fileExists(fileName) {
 			break
 		}
 
-		lastHeight = startHeight + int64(entriesPerFile) - 1
 		if err := streamFile(w, fileName); err != nil {
 			log.Errorf("Error while streaming file: %v", err)
 			sendError(w, status500, err)
@@ -340,14 +363,14 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 	s.cacheLock.RLock()
 	defer s.cacheLock.RUnlock()
 
-	if _, ok := s.heightToHash[int32(endHeight)]; !ok {
+	if _, ok := s.heightToHash[int32(lastHeight)]; !ok {
 		sendError(w, status400, fmt.Errorf("invalid height"))
 		return
 	}
 
-	// The requested start height wasn't yet in a file, so we need to
-	// stream the headers from memory.
-	err = serializeCb(w, int32(lastHeight+1), int32(endHeight))
+	// The requested end height goes over what's in files, so we need to
+	// stream the remaining headers from memory.
+	err = serializeCb(w, int32(lastHeight), int32(endHeight))
 	if err != nil {
 		log.Errorf("Error serializing: %v", err)
 	}
@@ -450,7 +473,7 @@ func (s *server) checkEndHeight(height int64, entriesPerFile int32) error {
 			"height %d", height, s.currentHeight.Load())
 	}
 
-	if height == 0 || height%int64(entriesPerFile) != 0 {
+	if height == 0 {
 		return fmt.Errorf("invalid end height %d, must be a multiple "+
 			"of %d", height, entriesPerFile)
 	}
