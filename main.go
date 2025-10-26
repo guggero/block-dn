@@ -38,8 +38,9 @@ type mainCommand struct {
 
 	lightMode bool
 
-	baseDir string
-	logDir  string
+	baseDir   string
+	logDir    string
+	indexPage string
 
 	listenAddr string
 
@@ -120,6 +121,18 @@ func main() {
 				return
 			}
 
+			if cc.indexPage != "" {
+				pageContent, err := os.ReadFile(cc.indexPage)
+				if err != nil {
+					log.Errorf("Error reading index page "+
+						"file '%s': %v", cc.indexPage,
+						err)
+					return
+				}
+
+				indexHTML = string(pageContent)
+			}
+
 			server := newServer(
 				cc.lightMode, cc.baseDir, cc.listenAddr,
 				cc.bitcoindConfig, chainParams,
@@ -185,6 +198,10 @@ func main() {
 		&cc.logDir, "log-dir", workDir, "The log directory where the "+
 			"log file will be written",
 	)
+	cc.cmd.PersistentFlags().StringVar(
+		&cc.indexPage, "index-page", "", "Full path to the index.html "+
+			"that should be used instead of the default one that "+
+			"comes with the project",
 	)
 	cc.cmd.PersistentFlags().StringVar(
 		&cc.listenAddr, "listen-addr", cc.listenAddr, "The local "+
