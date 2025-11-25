@@ -5,11 +5,46 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 )
+
+// cache is an in-memory cache of height to block hash, block headers, filter
+// headers and filters.
+type cache struct {
+	sync.RWMutex
+
+	headersPerFile int32
+	filtersPerFile int32
+
+	heightToHash  map[int32]chainhash.Hash
+	headers       map[chainhash.Hash]*wire.BlockHeader
+	filterHeaders map[chainhash.Hash]*chainhash.Hash
+	filters       map[chainhash.Hash][]byte
+}
+
+func (c *cache) clear() {
+	c.Lock()
+	c.heightToHash = make(map[int32]chainhash.Hash, c.headersPerFile)
+	c.headers = make(
+		map[chainhash.Hash]*wire.BlockHeader, c.headersPerFile,
+	)
+	c.filterHeaders = make(
+		map[chainhash.Hash]*chainhash.Hash, c.headersPerFile,
+	)
+	c.filters = make(map[chainhash.Hash][]byte, c.filtersPerFile)
+	c.Unlock()
+}
+
+func newCache() *cache {
+	c := &cache{}
+	c.clear()
+
+	return c
+}
 
 // updateFiles updates the header and filter files on disk.
 //
@@ -133,12 +168,12 @@ func (s *server) updateCacheAndFiles(startBlock, endBlock int32) error {
 				"hash %s: %w", hash, err)
 		}
 
-		s.cacheLock.Lock()
-		s.heightToHash[i] = *hash
-		s.headers[*hash] = header
-		s.filters[*hash] = filterBytes
-		s.filterHeaders[*hash] = filterHeader
-		s.cacheLock.Unlock()
+		s.cache.Lock()
+		s.cache.heightToHash[i] = *hash
+		s.cache.headers[*hash] = header
+		s.cache.filters[*hash] = filterBytes
+		s.cache.filterHeaders[*hash] = filterHeader
+		s.cache.Unlock()
 
 		if (i+1)%s.filtersPerFile == 0 {
 			fileStart := i - s.filtersPerFile + 1
@@ -150,7 +185,7 @@ func (s *server) updateCacheAndFiles(startBlock, endBlock int32) error {
 				"at %d, containing %d filters to %s", i,
 				fileStart, s.filtersPerFile, filterFileName)
 
-			err = s.writeFilters(filterFileName, fileStart, i)
+			err = s.cache.writeFilters(filterFileName, fileStart, i)
 			if err != nil {
 				return fmt.Errorf("error writing filters: %w",
 					err)
@@ -171,7 +206,7 @@ func (s *server) updateCacheAndFiles(startBlock, endBlock int32) error {
 				"at %d, containing %d headers to %s", i,
 				fileStart, s.headersPerFile, headerFileName)
 
-			err = s.writeHeaders(headerFileName, fileStart, i)
+			err = s.cache.writeHeaders(headerFileName, fileStart, i)
 			if err != nil {
 				return fmt.Errorf("error writing headers: %w",
 					err)
@@ -182,7 +217,7 @@ func (s *server) updateCacheAndFiles(startBlock, endBlock int32) error {
 				fileStart, s.headersPerFile,
 				filterHeaderFileName)
 
-			err = s.writeFilterHeaders(
+			err = s.cache.writeFilterHeaders(
 				filterHeaderFileName, fileStart, i,
 			)
 			if err != nil {
@@ -192,24 +227,11 @@ func (s *server) updateCacheAndFiles(startBlock, endBlock int32) error {
 
 			// We don't need the headers or filters anymore, so
 			// clear them out.
-			s.clearCache()
+			s.cache.clear()
 		}
 
 		s.currentHeight.Store(i)
 	}
 
 	return nil
-}
-
-func (s *server) clearCache() {
-	s.cacheLock.Lock()
-	s.heightToHash = make(map[int32]chainhash.Hash, s.headersPerFile)
-	s.headers = make(
-		map[chainhash.Hash]*wire.BlockHeader, s.headersPerFile,
-	)
-	s.filterHeaders = make(
-		map[chainhash.Hash]*chainhash.Hash, s.headersPerFile,
-	)
-	s.filters = make(map[chainhash.Hash][]byte, s.filtersPerFile)
-	s.cacheLock.Unlock()
 }

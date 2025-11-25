@@ -128,17 +128,17 @@ func (s *server) indexRequestHandler(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
-	s.cacheLock.RLock()
-	defer s.cacheLock.RUnlock()
+	s.cache.RLock()
+	defer s.cache.RUnlock()
 
 	bestHeight := s.currentHeight.Load()
-	bestBlock, ok := s.heightToHash[bestHeight]
+	bestBlock, ok := s.cache.heightToHash[bestHeight]
 	if !ok {
 		sendError(w, status500, errInvalidSyncStatus)
 		return
 	}
 
-	bestFilter, ok := s.filterHeaders[bestBlock]
+	bestFilter, ok := s.cache.filterHeaders[bestBlock]
 	if !ok {
 		sendError(w, status500, errInvalidSyncStatus)
 		return
@@ -160,7 +160,7 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 func (s *server) headersRequestHandler(w http.ResponseWriter, r *http.Request) {
 	s.heightBasedRequestHandler(
 		w, r, HeaderFileDir, HeaderFileNamePattern,
-		int64(s.headersPerFile), s.serializeHeaders,
+		int64(s.headersPerFile), s.cache.serializeHeaders,
 	)
 }
 
@@ -169,7 +169,7 @@ func (s *server) headersImportRequestHandler(w http.ResponseWriter,
 
 	s.heightBasedImportRequestHandler(
 		w, r, HeaderFileDir, HeaderFileNamePattern,
-		s.headersPerFile, s.serializeHeaders, typeBlockHeader,
+		s.headersPerFile, s.cache.serializeHeaders, typeBlockHeader,
 	)
 }
 
@@ -178,7 +178,7 @@ func (s *server) filterHeadersRequestHandler(w http.ResponseWriter,
 
 	s.heightBasedRequestHandler(
 		w, r, HeaderFileDir, FilterHeaderFileNamePattern,
-		int64(s.headersPerFile), s.serializeFilterHeaders,
+		int64(s.headersPerFile), s.cache.serializeFilterHeaders,
 	)
 }
 
@@ -187,7 +187,7 @@ func (s *server) filterHeadersImportRequestHandler(w http.ResponseWriter,
 
 	s.heightBasedImportRequestHandler(
 		w, r, HeaderFileDir, FilterHeaderFileNamePattern,
-		s.headersPerFile, s.serializeFilterHeaders,
+		s.headersPerFile, s.cache.serializeFilterHeaders,
 		typeFilterHeader,
 	)
 }
@@ -195,7 +195,7 @@ func (s *server) filterHeadersImportRequestHandler(w http.ResponseWriter,
 func (s *server) filtersRequestHandler(w http.ResponseWriter, r *http.Request) {
 	s.heightBasedRequestHandler(
 		w, r, FilterFileDir, FilterFileNamePattern,
-		int64(s.filtersPerFile), s.serializeFilters,
+		int64(s.filtersPerFile), s.cache.serializeFilters,
 	)
 }
 
@@ -243,10 +243,10 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 		return
 	}
 
-	s.cacheLock.RLock()
-	defer s.cacheLock.RUnlock()
+	s.cache.RLock()
+	defer s.cache.RUnlock()
 
-	if _, ok := s.heightToHash[int32(startHeight)]; !ok {
+	if _, ok := s.cache.heightToHash[int32(startHeight)]; !ok {
 		sendError(w, status400, fmt.Errorf("invalid height"))
 		return
 	}
@@ -360,10 +360,10 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 		}
 	}
 
-	s.cacheLock.RLock()
-	defer s.cacheLock.RUnlock()
+	s.cache.RLock()
+	defer s.cache.RUnlock()
 
-	if _, ok := s.heightToHash[int32(lastHeight)]; !ok {
+	if _, ok := s.cache.heightToHash[int32(lastHeight)]; !ok {
 		sendError(w, status400, fmt.Errorf("invalid height"))
 		return
 	}

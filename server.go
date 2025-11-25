@@ -10,9 +10,7 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/rpcclient"
-	"github.com/btcsuite/btcd/wire"
 	"github.com/gorilla/mux"
 	"github.com/lightningnetwork/lnd/fn/v2"
 )
@@ -40,12 +38,7 @@ type server struct {
 	startupComplete atomic.Bool
 	currentHeight   atomic.Int32
 
-	heightToHash  map[int32]chainhash.Hash
-	headers       map[chainhash.Hash]*wire.BlockHeader
-	filterHeaders map[chainhash.Hash]*chainhash.Hash
-	filters       map[chainhash.Hash][]byte
-
-	cacheLock sync.RWMutex
+	cache *cache
 
 	wg   sync.WaitGroup
 	errs *fn.ConcurrentQueue[error]
@@ -67,11 +60,12 @@ func newServer(lightMode bool, baseDir, listenAddr string,
 		headersPerFile: headersPerFile,
 		filtersPerFile: filtersPerFile,
 
+		cache: newCache(),
+
 		errs: fn.NewConcurrentQueue[error](2),
 		quit: make(chan struct{}),
 	}
 
-	s.clearCache()
 	s.router = s.createRouter()
 
 	return s
