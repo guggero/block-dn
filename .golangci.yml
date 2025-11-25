@@ -2,7 +2,7 @@ version: "2"
 
 run:
   timeout: 5m
-  go: "1.23"
+  go: "1.24"
 
 linters:
   default: all
@@ -39,8 +39,9 @@ linters:
 
   settings:
     govet:
-      # Don't report about shadowed variables.
-      shadow: false
+      disable:
+        # Don't report about shadowed variables.
+        - shadow
     gofmt:
       # simplify code: gofmt with `-s` option, true by default.
       simplify: true
