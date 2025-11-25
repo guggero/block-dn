@@ -18,7 +18,8 @@ defaults:
     shell: bash
 
 env:
-  GO_VERSION: 1.21.0
+  GO_VERSION: 1.24.10
+  LINT_VERSION: v2.6.2
   BITCOIND_VERSION: "30"
 
 jobs:
@@ -39,17 +40,13 @@ jobs:
         with:
           go-version: '${{ env.GO_VERSION }}'
 
-      - name: linter cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/go-lint-cache
-          key: ${{ runner.os }}-go-${{ env.GO_VERSION }}-linter-${{ hashFiles('**/go.sum') }}
-
       - name: check code format
         run: make fmt-check
 
-      - name: lint
-        run: make lint
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: '${{ env.LINT_VERSION }}'
 
   ########################
   # run unit tests

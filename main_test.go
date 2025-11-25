@@ -60,7 +60,7 @@ type testContext struct {
 }
 
 func (ctx *testContext) fetchJSON(t *testing.T, endpoint string,
-	target interface{}) http.Header {
+	target any) http.Header {
 
 	url := fmt.Sprintf("http://%s/%s", ctx.server.listenAddr, endpoint)
 	resp, err := http.Get(url)
