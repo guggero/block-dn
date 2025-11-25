@@ -41,11 +41,11 @@ var (
 	)
 )
 
-func (s *server) writeHeaders(fileName string, startIndex,
+func (c *cache) writeHeaders(fileName string, startIndex,
 	endIndex int32) error {
 
-	s.cacheLock.RLock()
-	defer s.cacheLock.RUnlock()
+	c.RLock()
+	defer c.RUnlock()
 
 	log.Debugf("Writing header file %s", fileName)
 	file, err := os.Create(fileName)
@@ -53,7 +53,7 @@ func (s *server) writeHeaders(fileName string, startIndex,
 		return fmt.Errorf("error creating file %s: %w", fileName, err)
 	}
 
-	err = s.serializeHeaders(file, startIndex, endIndex)
+	err = c.serializeHeaders(file, startIndex, endIndex)
 	if err != nil {
 		return fmt.Errorf("error writing headers to file %s: %w",
 			fileName, err)
@@ -67,16 +67,16 @@ func (s *server) writeHeaders(fileName string, startIndex,
 	return nil
 }
 
-func (s *server) serializeHeaders(w io.Writer, startIndex,
+func (c *cache) serializeHeaders(w io.Writer, startIndex,
 	endIndex int32) error {
 
 	for j := startIndex; j <= endIndex; j++ {
-		hash, ok := s.heightToHash[j]
+		hash, ok := c.heightToHash[j]
 		if !ok {
 			return fmt.Errorf("invalid height %d", j)
 		}
 
-		header, ok := s.headers[hash]
+		header, ok := c.headers[hash]
 		if !ok {
 			return fmt.Errorf("missing header for hash %s (height "+
 				"%d)", hash.String(), j)
@@ -91,11 +91,11 @@ func (s *server) serializeHeaders(w io.Writer, startIndex,
 	return nil
 }
 
-func (s *server) writeFilterHeaders(fileName string, startIndex,
+func (c *cache) writeFilterHeaders(fileName string, startIndex,
 	endIndex int32) error {
 
-	s.cacheLock.RLock()
-	defer s.cacheLock.RUnlock()
+	c.RLock()
+	defer c.RUnlock()
 
 	log.Debugf("Writing filter header file %s", fileName)
 	file, err := os.Create(fileName)
@@ -103,7 +103,7 @@ func (s *server) writeFilterHeaders(fileName string, startIndex,
 		return fmt.Errorf("error creating file %s: %w", fileName, err)
 	}
 
-	err = s.serializeFilterHeaders(file, startIndex, endIndex)
+	err = c.serializeFilterHeaders(file, startIndex, endIndex)
 	if err != nil {
 		return fmt.Errorf("error writing filter headers to file %s: %w",
 			fileName, err)
@@ -117,16 +117,16 @@ func (s *server) writeFilterHeaders(fileName string, startIndex,
 	return nil
 }
 
-func (s *server) serializeFilterHeaders(w io.Writer, startIndex,
+func (c *cache) serializeFilterHeaders(w io.Writer, startIndex,
 	endIndex int32) error {
 
 	for j := startIndex; j <= endIndex; j++ {
-		hash, ok := s.heightToHash[j]
+		hash, ok := c.heightToHash[j]
 		if !ok {
 			return fmt.Errorf("invalid height %d", j)
 		}
 
-		filterHeader, ok := s.filterHeaders[hash]
+		filterHeader, ok := c.filterHeaders[hash]
 		if !ok {
 			return fmt.Errorf("missing filter header for hash %s "+
 				"(height %d)", hash.String(), j)
@@ -146,11 +146,11 @@ func (s *server) serializeFilterHeaders(w io.Writer, startIndex,
 	return nil
 }
 
-func (s *server) writeFilters(fileName string, startIndex,
+func (c *cache) writeFilters(fileName string, startIndex,
 	endIndex int32) error {
 
-	s.cacheLock.RLock()
-	defer s.cacheLock.RUnlock()
+	c.RLock()
+	defer c.RUnlock()
 
 	log.Debugf("Writing filter file %s", fileName)
 	file, err := os.Create(fileName)
@@ -158,7 +158,7 @@ func (s *server) writeFilters(fileName string, startIndex,
 		return fmt.Errorf("error creating file %s: %w", fileName, err)
 	}
 
-	err = s.serializeFilters(file, startIndex, endIndex)
+	err = c.serializeFilters(file, startIndex, endIndex)
 	if err != nil {
 		return fmt.Errorf("error writing filters to file %s: %w",
 			fileName, err)
@@ -172,16 +172,16 @@ func (s *server) writeFilters(fileName string, startIndex,
 	return nil
 }
 
-func (s *server) serializeFilters(w io.Writer, startIndex,
+func (c *cache) serializeFilters(w io.Writer, startIndex,
 	endIndex int32) error {
 
 	for j := startIndex; j <= endIndex; j++ {
-		hash, ok := s.heightToHash[j]
+		hash, ok := c.heightToHash[j]
 		if !ok {
 			return fmt.Errorf("invalid height %d", j)
 		}
 
-		filter, ok := s.filters[hash]
+		filter, ok := c.filters[hash]
 		if !ok {
 			return fmt.Errorf("missing filter for hash %s (height "+
 				"%d)", hash.String(), j)
