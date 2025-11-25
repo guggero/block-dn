@@ -481,7 +481,7 @@ func (s *server) checkEndHeight(height int64, entriesPerFile int32) error {
 	return nil
 }
 
-func sendJSON(w http.ResponseWriter, v interface{}, maxAge time.Duration) {
+func sendJSON(w http.ResponseWriter, v any, maxAge time.Duration) {
 	addCacheHeaders(w, maxAge)
 	addCorsHeaders(w)
 	w.Header().Set("Content-Type", "application/json")
