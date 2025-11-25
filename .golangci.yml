@@ -42,9 +42,6 @@ linters:
       disable:
         # Don't report about shadowed variables.
         - shadow
-    gofmt:
-      # simplify code: gofmt with `-s` option, true by default.
-      simplify: true
     whitespace:
       multi-func: true
       multi-if: true
