@@ -60,7 +60,7 @@ func newServer(lightMode bool, baseDir, listenAddr string,
 		headersPerFile: headersPerFile,
 		filtersPerFile: filtersPerFile,
 
-		cache: newCache(),
+		cache: newCache(headersPerFile, filtersPerFile),
 
 		errs: fn.NewConcurrentQueue[error](2),
 		quit: make(chan struct{}),
