@@ -23,42 +23,48 @@ var (
 )
 
 type server struct {
-	lightMode      bool
-	baseDir        string
-	listenAddr     string
-	chainCfg       *rpcclient.ConnConfig
-	chainParams    *chaincfg.Params
-	reOrgSafeDepth uint32
-	chain          *rpcclient.Client
-	router         *mux.Router
-	httpServer     *http.Server
+	lightMode        bool
+	indexSPTweakData bool
+	baseDir          string
+	listenAddr       string
+	chainCfg         *rpcclient.ConnConfig
+	chainParams      *chaincfg.Params
+	reOrgSafeDepth   uint32
+	chain            *rpcclient.Client
+	router           *mux.Router
+	httpServer       *http.Server
 
-	headersPerFile int32
-	filtersPerFile int32
+	headersPerFile  int32
+	filtersPerFile  int32
+	spTweaksPerFile int32
 
 	h2hCache     *heightToHashCache
 	headerFiles  *headerFiles
 	cFilterFiles *cFilterFiles
+	spTweakFiles *spTweakFiles
 
 	wg   sync.WaitGroup
 	errs *fn.ConcurrentQueue[error]
 	quit chan struct{}
 }
 
-func newServer(lightMode bool, baseDir, listenAddr string,
+func newServer(lightMode, indexSPTweakData bool, baseDir, listenAddr string,
 	chainCfg *rpcclient.ConnConfig, chainParams *chaincfg.Params,
-	reOrgSafeDepth uint32, headersPerFile, filtersPerFile int32) *server {
+	reOrgSafeDepth uint32, headersPerFile, filtersPerFile,
+	spTweaksPerFile int32) *server {
 
 	s := &server{
-		lightMode:      lightMode,
-		baseDir:        baseDir,
-		listenAddr:     listenAddr,
-		chainCfg:       chainCfg,
-		chainParams:    chainParams,
-		reOrgSafeDepth: reOrgSafeDepth,
+		lightMode:        lightMode,
+		indexSPTweakData: indexSPTweakData,
+		baseDir:          baseDir,
+		listenAddr:       listenAddr,
+		chainCfg:         chainCfg,
+		chainParams:      chainParams,
+		reOrgSafeDepth:   reOrgSafeDepth,
 
-		headersPerFile: headersPerFile,
-		filtersPerFile: filtersPerFile,
+		headersPerFile:  headersPerFile,
+		filtersPerFile:  filtersPerFile,
+		spTweaksPerFile: spTweaksPerFile,
 
 		errs: fn.NewConcurrentQueue[error](2),
 		quit: make(chan struct{}),
@@ -180,6 +186,32 @@ func (s *server) start() error {
 		err := s.cFilterFiles.updateFiles(info.Blocks)
 		if err != nil && !errors.Is(err, errServerShutdown) {
 			log.Errorf("Error updating filter files: %v", err)
+			s.errs.ChanIn() <- err
+		}
+	}()
+
+	// If we're not indexing SP tweak data, we can return here.
+	if !s.indexSPTweakData {
+		return nil
+	}
+
+	s.spTweakFiles = newSPTweakFiles(
+		s.spTweaksPerFile, s.chain, s.quit, s.baseDir, s.chainParams,
+		s.h2hCache,
+	)
+
+	s.wg.Add(1)
+	go func() {
+		defer func() {
+			s.wg.Done()
+			log.Infof("Background SP tweak data file update " +
+				"finished")
+		}()
+
+		log.Infof("Starting background SP tweak data file update")
+		err := s.spTweakFiles.updateFiles(info.Blocks)
+		if err != nil && !errors.Is(err, errServerShutdown) {
+			log.Errorf("Error updating SP tweak data file: %v", err)
 			s.errs.ChanIn() <- err
 		}
 	}()

@@ -17,6 +17,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/rpcclient"
+	"github.com/btcsuite/btcwallet/chain"
 	lntestminer "github.com/lightningnetwork/lnd/lntest/miner"
 	"github.com/lightningnetwork/lnd/lntest/port"
 	"github.com/lightningnetwork/lnd/lntest/unittest"
@@ -25,7 +26,7 @@ import (
 )
 
 const (
-	numStartupBlocks = 100
+	numStartupBlocks = 50
 
 	// numInitialBlocks is the number of blocks we mine for testing. In
 	// regtest mode, when using btcd as a miner, we can only mine blocks in
@@ -44,12 +45,15 @@ const (
 )
 
 var (
-	syncTimeout = 2 * time.Minute
-	testTimeout = 60 * time.Second
+	syncTimeout  = 2 * time.Minute
+	testTimeout  = 60 * time.Second
+	shortTimeout = 5 * time.Second
 
 	testParams = chaincfg.RegressionNetParams
 
-	totalStartupBlocks = numStartupBlocks + testParams.CoinbaseMaturity
+	totalStartupBlocks = numStartupBlocks +
+		uint32(testParams.CoinbaseMaturity) +
+		testParams.MinerConfirmationWindow*2
 	totalInitialBlocks = totalStartupBlocks + numInitialBlocks
 )
 
@@ -584,14 +588,15 @@ func testTxRaw(t *testing.T, ctx *testContext) {
 
 func TestBlockDN(t *testing.T) {
 	testDir := ".unit-test-logs"
-	miner, backend, backendCfg := setupBackend(t, testDir)
+	miner, backend, backendCfg, _ := setupBackend(t, testDir)
 
 	dataDir := t.TempDir()
 	listenAddr := fmt.Sprintf("127.0.0.1:%d", port.NextAvailablePort())
 
 	testServer := newServer(
-		false, dataDir, listenAddr, &backendCfg, unittest.NetParams, 6,
-		DefaultRegtestHeadersPerFile, DefaultRegtestFiltersPerFile,
+		false, false, dataDir, listenAddr, &backendCfg,
+		unittest.NetParams, 6, DefaultRegtestHeadersPerFile,
+		DefaultRegtestFiltersPerFile, DefaultRegtestSPTweaksPerFile,
 	)
 
 	// Mine a couple blocks and wait for the backend to catch up.
@@ -642,7 +647,7 @@ func TestBlockDN(t *testing.T) {
 
 func newBitcoind(t *testing.T, logdir string,
 	extraArgs []string) (*rpcclient.Client, rpcclient.ConnConfig,
-	func() error) {
+	*chain.BitcoindConfig, func() error) {
 
 	tempBitcoindDir := t.TempDir()
 
@@ -705,17 +710,32 @@ func newBitcoind(t *testing.T, logdir string,
 		HTTPPostMode:         true,
 	}
 
+	bitcoindCfg := &chain.BitcoindConfig{
+		ChainParams: &testParams,
+		Host:        rpcHost,
+		User:        rpcUser,
+		Pass:        rpcPass,
+		ZMQConfig: &chain.ZMQConfig{
+			ZMQBlockHost:           zmqBlockAddr,
+			ZMQTxHost:              zmqTxAddr,
+			MempoolPollingInterval: pollInterval,
+			RPCBatchInterval:       pollInterval,
+			RPCBatchSize:           1,
+			ZMQReadDeadline:        defaultTimeout,
+		},
+	}
+
 	client, err := rpcclient.New(&rpcCfg, nil)
 	if err != nil {
 		_ = cleanUp()
 		require.NoError(t, err)
 	}
 
-	return client, rpcCfg, cleanUp
+	return client, rpcCfg, bitcoindCfg, cleanUp
 }
 
 func setupBackend(t *testing.T, testDir string) (*lntestminer.HarnessMiner,
-	*rpcclient.Client, rpcclient.ConnConfig) {
+	*rpcclient.Client, rpcclient.ConnConfig, *chain.BitcoindConfig) {
 
 	ctx := context.Background()
 	setupLogging(testDir, "debug")
@@ -726,18 +746,24 @@ func setupBackend(t *testing.T, testDir string) (*lntestminer.HarnessMiner,
 	miner := lntestminer.NewTempMiner(
 		ctx, t, filepath.Join(testDir, "temp-miner"), "miner.log",
 	)
-	require.NoError(t, miner.SetUp(true, 100))
+	require.NoError(t, miner.SetUp(true, numStartupBlocks))
+
+	// Next mine enough blocks in order for segwit and the CSV package
+	// soft-fork to activate on SimNet.
+	numBlocks := testParams.MinerConfirmationWindow * 2
+	miner.GenerateBlocks(numBlocks)
 
 	t.Cleanup(miner.Stop)
 
-	backend, backendCfg, cleanup := newBitcoind(t, testDir, []string{
-		"-regtest",
-		"-txindex",
-		"-disablewallet",
-		"-peerblockfilters=1",
-		"-blockfilterindex=1",
-		"-dbcache=512",
-	})
+	backend, backendCfg, bitcoindCfg, cleanup := newBitcoind(
+		t, testDir, []string{
+			"-regtest",
+			"-txindex",
+			"-disablewallet",
+			"-peerblockfilters=1",
+			"-blockfilterindex=1",
+		},
+	)
 
 	t.Cleanup(func() {
 		require.NoError(t, cleanup())
@@ -748,7 +774,7 @@ func setupBackend(t *testing.T, testDir string) (*lntestminer.HarnessMiner,
 	}, testTimeout)
 	require.NoError(t, err)
 
-	return miner, backend, backendCfg
+	return miner, backend, backendCfg, bitcoindCfg
 }
 
 func waitBackendSync(t *testing.T, backend *rpcclient.Client,
@@ -780,6 +806,8 @@ func waitBackendSync(t *testing.T, backend *rpcclient.Client,
 			return fmt.Errorf("expected height %d, got %d",
 				minerHeight, backendHeight)
 		}
+
+		t.Logf("Synced backend to miner at height %d", backendHeight)
 
 		return nil
 	}, syncTimeout)

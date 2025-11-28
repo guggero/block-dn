@@ -22,7 +22,7 @@ var (
 
 func TestHeightToHashCache(t *testing.T) {
 	testDir := t.TempDir()
-	backend, _, cleanup := newBitcoind(t, testDir, []string{
+	backend, _, _, cleanup := newBitcoind(t, testDir, []string{
 		"-regtest",
 		"-disablewallet",
 	})

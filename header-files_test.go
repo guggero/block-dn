@@ -13,7 +13,7 @@ import (
 
 const (
 	headersPerFile = 100
-	initialBlocks  = 250
+	initialBlocks  = 450
 
 	headerFileSize int64 = headersPerFile * headerSize
 	filterFileSize int64 = headersPerFile * filterHeadersSize
@@ -21,9 +21,9 @@ const (
 
 func TestHeaderFilesUpdate(t *testing.T) {
 	testDir := ".unit-test-logs"
-	miner, backend, _ := setupBackend(t, testDir)
+	miner, backend, _, _ := setupBackend(t, testDir)
 
-	// Mine initial blocks. The miner starts with 200 blocks already mined.
+	// Mine initial blocks. The miner starts with 438 blocks already mined.
 	_ = miner.MineEmptyBlocks(initialBlocks - int(totalStartupBlocks))
 
 	// Wait until the backend is fully synced to the miner.
@@ -40,24 +40,26 @@ func TestHeaderFilesUpdate(t *testing.T) {
 	var wg sync.WaitGroup
 
 	// Wait for the initial blocks to be written.
-	waitFilesWritten(t, &wg, hf, initialBlocks)
+	waitForTargetHeight(t, &wg, hf, initialBlocks)
 
 	// Check files.
 	headerDir := filepath.Join(dataDir, HeaderFileDir)
 	files, err := os.ReadDir(headerDir)
 	require.NoError(t, err)
-	require.Len(t, files, 4)
+	require.Len(t, files, 8)
 
 	// Check file names and sizes.
 	checkHeaderFiles(t, headerDir, 0, 99)
 	checkHeaderFiles(t, headerDir, 100, 199)
+	checkHeaderFiles(t, headerDir, 200, 299)
+	checkHeaderFiles(t, headerDir, 300, 399)
 
 	// Stop the service.
 	close(quit)
 	wg.Wait()
 
 	// Second run: restart and continue.
-	const finalBlocks = 350
+	const finalBlocks = 550
 	_ = miner.MineEmptyBlocks(finalBlocks - initialBlocks)
 
 	// Wait until the backend is fully synced to the miner.
@@ -69,15 +71,15 @@ func TestHeaderFilesUpdate(t *testing.T) {
 	)
 
 	// Wait for the final blocks to be written.
-	waitFilesWritten(t, &wg, hf, finalBlocks)
+	waitForTargetHeight(t, &wg, hf, finalBlocks)
 
 	// Check files again.
 	files, err = os.ReadDir(headerDir)
 	require.NoError(t, err)
-	require.Len(t, files, 6)
+	require.Len(t, files, 10)
 
 	// Check new file names and sizes.
-	checkHeaderFiles(t, headerDir, 200, 299)
+	checkHeaderFiles(t, headerDir, 400, 499)
 
 	// Stop the service.
 	close(quit)
@@ -89,7 +91,7 @@ type fileWriter interface {
 	getCurrentHeight() int32
 }
 
-func waitFilesWritten(t *testing.T, wg *sync.WaitGroup, hf fileWriter,
+func waitForTargetHeight(t *testing.T, wg *sync.WaitGroup, hf fileWriter,
 	targetHeight int32) {
 
 	t.Helper()
