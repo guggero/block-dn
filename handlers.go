@@ -90,6 +90,11 @@ type serializable interface {
 	Serialize(w io.Writer) error
 }
 
+type blockProcessor interface {
+	isStartupComplete() bool
+	getCurrentHeight() int32
+}
+
 func (s *server) createRouter() *mux.Router {
 	router := mux.NewRouter()
 	router.HandleFunc("/", s.indexRequestHandler)
@@ -131,14 +136,14 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 	s.h2hCache.RLock()
 	defer s.h2hCache.RUnlock()
 
-	bestHeight := s.currentHeight.Load()
+	bestHeight := s.headerFiles.getCurrentHeight()
 	bestBlock, err := s.h2hCache.getBlockHash(bestHeight)
 	if err != nil {
 		sendError(w, status500, errInvalidSyncStatus)
 		return
 	}
 
-	bestFilter, ok := s.cFilterFiles.filterHeaders[*bestBlock]
+	bestFilter, ok := s.headerFiles.filterHeaders[*bestBlock]
 	if !ok {
 		sendError(w, status500, errInvalidSyncStatus)
 		return
@@ -160,7 +165,8 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 func (s *server) headersRequestHandler(w http.ResponseWriter, r *http.Request) {
 	s.heightBasedRequestHandler(
 		w, r, HeaderFileDir, HeaderFileNamePattern,
-		int64(s.headersPerFile), s.cFilterFiles.serializeHeaders,
+		int64(s.headersPerFile), s.headerFiles.serializeHeaders,
+		s.headerFiles,
 	)
 }
 
@@ -169,7 +175,7 @@ func (s *server) headersImportRequestHandler(w http.ResponseWriter,
 
 	s.heightBasedImportRequestHandler(
 		w, r, HeaderFileDir, HeaderFileNamePattern, s.headersPerFile,
-		s.cFilterFiles.serializeHeaders, typeBlockHeader,
+		s.headerFiles.serializeHeaders, typeBlockHeader,
 	)
 }
 
@@ -178,7 +184,8 @@ func (s *server) filterHeadersRequestHandler(w http.ResponseWriter,
 
 	s.heightBasedRequestHandler(
 		w, r, HeaderFileDir, FilterHeaderFileNamePattern,
-		int64(s.headersPerFile), s.cFilterFiles.serializeFilterHeaders,
+		int64(s.headersPerFile), s.headerFiles.serializeFilterHeaders,
+		s.headerFiles,
 	)
 }
 
@@ -187,7 +194,7 @@ func (s *server) filterHeadersImportRequestHandler(w http.ResponseWriter,
 
 	s.heightBasedImportRequestHandler(
 		w, r, HeaderFileDir, FilterHeaderFileNamePattern,
-		s.headersPerFile, s.cFilterFiles.serializeFilterHeaders,
+		s.headersPerFile, s.headerFiles.serializeFilterHeaders,
 		typeFilterHeader,
 	)
 }
@@ -196,12 +203,14 @@ func (s *server) filtersRequestHandler(w http.ResponseWriter, r *http.Request) {
 	s.heightBasedRequestHandler(
 		w, r, FilterFileDir, FilterFileNamePattern,
 		int64(s.filtersPerFile), s.cFilterFiles.serializeFilters,
+		s.cFilterFiles,
 	)
 }
 
 func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 	r *http.Request, subDir, fileNamePattern string, entriesPerFile int64,
-	serializeCb func(w io.Writer, startIndex, endIndex int32) error) {
+	serializeCb func(w io.Writer, startIndex, endIndex int32) error,
+	processor blockProcessor) {
 
 	// These kinds of requests aren't available in light mode.
 	if s.lightMode {
@@ -209,7 +218,7 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 		return
 	}
 
-	if !s.startupComplete.Load() {
+	if !processor.isStartupComplete() {
 		sendError(w, status503, errStillStartingUp)
 		return
 	}
@@ -220,7 +229,7 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 		return
 	}
 
-	err = s.checkStartHeight(startHeight, int32(entriesPerFile))
+	err = s.checkStartHeight(processor, startHeight, int32(entriesPerFile))
 	if err != nil {
 		sendError(w, status400, err)
 		return
@@ -256,7 +265,7 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 	addCorsHeaders(w)
 	addCacheHeaders(w, maxAgeMemory)
 	w.WriteHeader(http.StatusOK)
-	err = serializeCb(w, int32(startHeight), s.currentHeight.Load())
+	err = serializeCb(w, int32(startHeight), processor.getCurrentHeight())
 	if err != nil {
 		log.Errorf("Error serializing: %v", err)
 	}
@@ -273,7 +282,7 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 		return
 	}
 
-	if !s.startupComplete.Load() {
+	if !s.headerFiles.startupComplete.Load() {
 		sendError(w, status503, errStillStartingUp)
 		return
 	}
@@ -284,7 +293,8 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 		return
 	}
 
-	if err := s.checkEndHeight(endHeight, entriesPerFile); err != nil {
+	err = s.checkEndHeight(s.headerFiles, endHeight, entriesPerFile)
+	if err != nil {
 		sendError(w, status400, err)
 		return
 	}
@@ -297,7 +307,8 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 	// We also check that we don't need to server partial content from
 	// files, as that would make things a bit more tricky.
 	maxCacheFileEndHeight := int64(
-		(s.currentHeight.Load() / entriesPerFile) * entriesPerFile,
+		(s.headerFiles.currentHeight.Load() / entriesPerFile) *
+			entriesPerFile,
 	)
 
 	// We don't want to return partial files. So for any range that can be
@@ -428,7 +439,8 @@ func (s *server) txOutProofRequestHandler(w http.ResponseWriter,
 	}
 
 	maxAge := maxAgeDisk
-	safeHeight := s.currentHeight.Load() - int32(s.reOrgSafeDepth)
+	safeHeight := s.headerFiles.currentHeight.Load() -
+		int32(s.reOrgSafeDepth)
 	if verboseHeader.Height > safeHeight {
 		maxAge = maxAgeTemporary
 	}
@@ -453,10 +465,12 @@ func (s *server) rawTxRequestHandler(w http.ResponseWriter, r *http.Request) {
 	sendBinary(w, tx.MsgTx(), maxAgeDisk)
 }
 
-func (s *server) checkStartHeight(height int64, entriesPerFile int32) error {
-	if int32(height) > s.currentHeight.Load() {
+func (s *server) checkStartHeight(processor blockProcessor, height int64,
+	entriesPerFile int32) error {
+
+	if int32(height) > processor.getCurrentHeight() {
 		return fmt.Errorf("start height %d is greater than current "+
-			"height %d", height, s.currentHeight.Load())
+			"height %d", height, processor.getCurrentHeight())
 	}
 
 	if height != 0 && height%int64(entriesPerFile) != 0 {
@@ -467,10 +481,12 @@ func (s *server) checkStartHeight(height int64, entriesPerFile int32) error {
 	return nil
 }
 
-func (s *server) checkEndHeight(height int64, entriesPerFile int32) error {
-	if int32(height) > s.currentHeight.Load() {
+func (s *server) checkEndHeight(processor blockProcessor, height int64,
+	entriesPerFile int32) error {
+
+	if int32(height) > processor.getCurrentHeight() {
 		return fmt.Errorf("end height %d is greater than current "+
-			"height %d", height, s.currentHeight.Load())
+			"height %d", height, processor.getCurrentHeight())
 	}
 
 	if height == 0 {

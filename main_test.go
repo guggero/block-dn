@@ -49,8 +49,8 @@ var (
 
 	testParams = chaincfg.RegressionNetParams
 
-	totalInitialBlocks = numStartupBlocks + testParams.CoinbaseMaturity +
-		numInitialBlocks
+	totalStartupBlocks = numStartupBlocks + testParams.CoinbaseMaturity
+	totalInitialBlocks = totalStartupBlocks + numInitialBlocks
 )
 
 type testContext struct {
@@ -388,7 +388,7 @@ func testHeadersImport(t *testing.T, ctx *testContext) {
 	require.Equal(t, "*", headers.Get(HeaderCORS))
 
 	// We make sure that the last 10 entries are actually correct.
-	lastHeight := ctx.server.currentHeight.Load()
+	lastHeight := ctx.server.headerFiles.getCurrentHeight()
 	require.Equal(t, int32(totalInitialBlocks), lastHeight)
 	for height := lastHeight - 9; height <= lastHeight; height++ {
 		start := importMetadataSize + int(height)*headerSize
@@ -494,7 +494,7 @@ func testFilterHeadersImport(t *testing.T, ctx *testContext) {
 	require.Equal(t, "*", headers.Get(HeaderCORS))
 
 	// We make sure that the last 10 entries are actually correct.
-	lastHeight := ctx.server.currentHeight.Load()
+	lastHeight := ctx.server.headerFiles.getCurrentHeight()
 	require.Equal(t, int32(totalInitialBlocks), lastHeight)
 	for height := lastHeight - 9; height <= lastHeight; height++ {
 		start := importMetadataSize + int(height)*filterHeadersSize
@@ -583,43 +583,12 @@ func testTxRaw(t *testing.T, ctx *testContext) {
 }
 
 func TestBlockDN(t *testing.T) {
-	ctx := context.Background()
 	testDir := ".unit-test-logs"
-
-	_ = os.RemoveAll(testDir)
-	_ = os.MkdirAll(testDir, 0700)
-
-	miner := lntestminer.NewTempMiner(
-		ctx, t, filepath.Join(testDir, "temp-miner"), "miner.log",
-	)
-	require.NoError(t, miner.SetUp(true, 100))
-
-	t.Cleanup(miner.Stop)
-
-	backend, backendCfg, cleanup := newBitcoind(
-		t, testDir, []string{
-			"-regtest",
-			"-txindex",
-			"-disablewallet",
-			"-peerblockfilters=1",
-			"-blockfilterindex=1",
-			"-dbcache=512",
-		},
-	)
-
-	t.Cleanup(func() {
-		require.NoError(t, cleanup())
-	})
-
-	err := wait.NoError(func() error {
-		return backend.AddNode(miner.P2PAddress(), rpcclient.ANAdd)
-	}, testTimeout)
-	require.NoError(t, err)
+	miner, backend, backendCfg := setupBackend(t, testDir)
 
 	dataDir := t.TempDir()
 	listenAddr := fmt.Sprintf("127.0.0.1:%d", port.NextAvailablePort())
 
-	setupLogging(testDir, "debug")
 	testServer := newServer(
 		false, dataDir, listenAddr, &backendCfg, unittest.NetParams, 6,
 		DefaultRegtestHeadersPerFile, DefaultRegtestFiltersPerFile,
@@ -630,50 +599,27 @@ func TestBlockDN(t *testing.T) {
 	_ = miner.MineEmptyBlocks(numInitialBlocks)
 
 	// Wait until the backend is fully synced to the miner.
-	t.Log("Waiting for bitcoind backend to sync to miner...")
-	syncState := int32(0)
-	err = wait.NoError(func() error {
-		backendCount, err := backend.GetBlockCount()
-		if err != nil {
-			return fmt.Errorf("unable to get backend height: %w",
-				err)
-		}
-
-		backendHeight := int32(backendCount)
-
-		_, minerHeight, err := miner.Client.GetBestBlock()
-		if err != nil {
-			return fmt.Errorf("unable to get miner height: %w", err)
-		}
-
-		if backendHeight > syncState+1000 {
-			t.Logf("Backend height: %d, Miner height: %d",
-				backendHeight, minerHeight)
-			syncState = backendHeight
-		}
-
-		if minerHeight != backendHeight {
-			return fmt.Errorf("expected height %d, got %d",
-				minerHeight, backendHeight)
-		}
-
-		return nil
-	}, syncTimeout)
-	require.NoError(t, err)
+	waitBackendSync(t, backend, miner)
 
 	t.Logf("Starting block-dn server at %s...", listenAddr)
 
 	require.NoError(t, testServer.start())
-	err = wait.NoError(func() error {
-		height := testServer.currentHeight.Load()
+	err := wait.NoError(func() error {
+		headerHeight := testServer.headerFiles.getCurrentHeight()
 		_, minerHeight, err := miner.Client.GetBestBlock()
 		if err != nil {
 			return fmt.Errorf("unable to get miner height: %w", err)
 		}
 
-		if minerHeight != height {
+		if minerHeight != headerHeight {
 			return fmt.Errorf("expected height %d, got %d",
-				minerHeight, height)
+				minerHeight, headerHeight)
+		}
+
+		if headerHeight != testServer.cFilterFiles.getCurrentHeight() {
+			return fmt.Errorf("cfilter height mismatch: %d vs %d",
+				testServer.cFilterFiles.getCurrentHeight(),
+				headerHeight)
 		}
 
 		return nil
@@ -766,4 +712,76 @@ func newBitcoind(t *testing.T, logdir string,
 	}
 
 	return client, rpcCfg, cleanUp
+}
+
+func setupBackend(t *testing.T, testDir string) (*lntestminer.HarnessMiner,
+	*rpcclient.Client, rpcclient.ConnConfig) {
+
+	ctx := context.Background()
+	setupLogging(testDir, "debug")
+
+	_ = os.RemoveAll(testDir)
+	_ = os.MkdirAll(testDir, 0700)
+
+	miner := lntestminer.NewTempMiner(
+		ctx, t, filepath.Join(testDir, "temp-miner"), "miner.log",
+	)
+	require.NoError(t, miner.SetUp(true, 100))
+
+	t.Cleanup(miner.Stop)
+
+	backend, backendCfg, cleanup := newBitcoind(t, testDir, []string{
+		"-regtest",
+		"-txindex",
+		"-disablewallet",
+		"-peerblockfilters=1",
+		"-blockfilterindex=1",
+		"-dbcache=512",
+	})
+
+	t.Cleanup(func() {
+		require.NoError(t, cleanup())
+	})
+
+	err := wait.NoError(func() error {
+		return backend.AddNode(miner.P2PAddress(), rpcclient.ANAdd)
+	}, testTimeout)
+	require.NoError(t, err)
+
+	return miner, backend, backendCfg
+}
+
+func waitBackendSync(t *testing.T, backend *rpcclient.Client,
+	miner *lntestminer.HarnessMiner) {
+
+	t.Log("Waiting for bitcoind backend to sync to miner...")
+	syncState := int32(0)
+	err := wait.NoError(func() error {
+		backendCount, err := backend.GetBlockCount()
+		if err != nil {
+			return fmt.Errorf("unable to get backend height: %w",
+				err)
+		}
+
+		backendHeight := int32(backendCount)
+
+		_, minerHeight, err := miner.Client.GetBestBlock()
+		if err != nil {
+			return fmt.Errorf("unable to get miner height: %w", err)
+		}
+
+		if backendHeight > syncState+1000 {
+			t.Logf("Backend height: %d, Miner height: %d",
+				backendHeight, minerHeight)
+			syncState = backendHeight
+		}
+
+		if minerHeight != backendHeight {
+			return fmt.Errorf("expected height %d, got %d",
+				minerHeight, backendHeight)
+		}
+
+		return nil
+	}, syncTimeout)
+	require.NoError(t, err)
 }

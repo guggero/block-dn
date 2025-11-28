@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg"
@@ -34,12 +33,11 @@ type server struct {
 	router         *mux.Router
 	httpServer     *http.Server
 
-	headersPerFile  int32
-	filtersPerFile  int32
-	startupComplete atomic.Bool
-	currentHeight   atomic.Int32
+	headersPerFile int32
+	filtersPerFile int32
 
 	h2hCache     *heightToHashCache
+	headerFiles  *headerFiles
 	cFilterFiles *cFilterFiles
 
 	wg   sync.WaitGroup
@@ -80,8 +78,12 @@ func (s *server) start() error {
 
 	s.h2hCache = newH2HCache(client)
 
+	s.headerFiles = newHeaderFiles(
+		s.headersPerFile, s.chain, s.quit, s.baseDir,
+		s.chainParams, s.h2hCache,
+	)
 	s.cFilterFiles = newCFilterFiles(
-		s.headersPerFile, s.filtersPerFile, s.chain, s.quit, s.baseDir,
+		s.filtersPerFile, s.chain, s.quit, s.baseDir,
 		s.chainParams, s.h2hCache,
 	)
 
@@ -114,6 +116,14 @@ func (s *server) start() error {
 				cacheBestBlock, backendBlock.String())
 		}
 	}
+
+	info, err := s.chain.GetBlockChainInfo()
+	if err != nil {
+		return fmt.Errorf("error getting block chain info: %w", err)
+	}
+
+	log.Debugf("Backend best block hash: %s, height: %d",
+		info.BestBlockHash, info.Blocks)
 
 	s.httpServer = &http.Server{
 		Addr:         s.listenAddr,
@@ -148,13 +158,28 @@ func (s *server) start() error {
 	go func() {
 		defer func() {
 			s.wg.Done()
+			log.Infof("Background header file update finished")
+		}()
+
+		log.Infof("Starting background header file update")
+		err := s.headerFiles.updateFiles(info.Blocks)
+		if err != nil && !errors.Is(err, errServerShutdown) {
+			log.Errorf("Error updating header files: %v", err)
+			s.errs.ChanIn() <- err
+		}
+	}()
+
+	s.wg.Add(1)
+	go func() {
+		defer func() {
+			s.wg.Done()
 			log.Infof("Background filter file update finished")
 		}()
 
 		log.Infof("Starting background filter file update")
-		err := s.cFilterFiles.updateFiles()
+		err := s.cFilterFiles.updateFiles(info.Blocks)
 		if err != nil && !errors.Is(err, errServerShutdown) {
-			log.Errorf("Error updating files: %v", err)
+			log.Errorf("Error updating filter files: %v", err)
 			s.errs.ChanIn() <- err
 		}
 	}()
