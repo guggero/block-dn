@@ -21,8 +21,9 @@ import (
 )
 
 const (
-	DefaultHeadersPerFile = 100_000
-	DefaultFiltersPerFile = 2_000
+	DefaultHeightToHashCacheSize = 100_000
+	DefaultHeadersPerFile        = 100_000
+	DefaultFiltersPerFile        = 2_000
 
 	DefaultRegtestHeadersPerFile = 2_000
 	DefaultRegtestFiltersPerFile = 2_000
@@ -50,7 +51,7 @@ var (
 type cFilterFiles struct {
 	quit <-chan struct{}
 
-	cache *cache
+	h2hCache *heightToHashCache
 
 	headersPerFile int32
 	filtersPerFile int32
@@ -60,21 +61,41 @@ type cFilterFiles struct {
 
 	startupComplete atomic.Bool
 	currentHeight   atomic.Int32
+
+	sync.RWMutex
+	headers       map[chainhash.Hash]*wire.BlockHeader
+	filterHeaders map[chainhash.Hash]*chainhash.Hash
+	filters       map[chainhash.Hash][]byte
 }
 
 func newCFilterFiles(headersPerFile, filtersPerFile int32,
 	chain *rpcclient.Client, quit <-chan struct{}, baseDir string,
-	chainParams *chaincfg.Params, cache *cache) *cFilterFiles {
+	chainParams *chaincfg.Params,
+	h2hCache *heightToHashCache) *cFilterFiles {
 
-	return &cFilterFiles{
+	cf := &cFilterFiles{
 		quit:           quit,
-		cache:          cache,
+		h2hCache:       h2hCache,
 		headersPerFile: headersPerFile,
 		filtersPerFile: filtersPerFile,
 		baseDir:        baseDir,
 		chain:          chain,
 		chainParams:    chainParams,
 	}
+	cf.clearData()
+
+	return cf
+}
+
+func (c *cFilterFiles) clearData() {
+	c.Lock()
+	defer c.Unlock()
+
+	c.headers = make(map[chainhash.Hash]*wire.BlockHeader, c.headersPerFile)
+	c.filterHeaders = make(
+		map[chainhash.Hash]*chainhash.Hash, c.headersPerFile,
+	)
+	c.filters = make(map[chainhash.Hash][]byte, c.filtersPerFile)
 }
 
 // updateFiles updates the header and filter files on disk.
@@ -201,12 +222,12 @@ func (c *cFilterFiles) updateCacheAndFiles(startBlock, endBlock int32) error {
 				"hash %s: %w", hash, err)
 		}
 
-		c.cache.Lock()
-		c.cache.heightToHash[i] = *hash
-		c.cache.headers[*hash] = header
-		c.cache.filters[*hash] = filterBytes
-		c.cache.filterHeaders[*hash] = filterHeader
-		c.cache.Unlock()
+		c.Lock()
+		c.h2hCache.addBlockHash(i, *hash)
+		c.headers[*hash] = header
+		c.filters[*hash] = filterBytes
+		c.filterHeaders[*hash] = filterHeader
+		c.Unlock()
 
 		if (i+1)%c.filtersPerFile == 0 {
 			fileStart := i - c.filtersPerFile + 1
@@ -218,7 +239,7 @@ func (c *cFilterFiles) updateCacheAndFiles(startBlock, endBlock int32) error {
 				"at %d, containing %d filters to %s", i,
 				fileStart, c.filtersPerFile, filterFileName)
 
-			err = c.cache.writeFilters(filterFileName, fileStart, i)
+			err = c.writeFilters(filterFileName, fileStart, i)
 			if err != nil {
 				return fmt.Errorf("error writing filters: %w",
 					err)
@@ -239,7 +260,7 @@ func (c *cFilterFiles) updateCacheAndFiles(startBlock, endBlock int32) error {
 				"at %d, containing %d headers to %s", i,
 				fileStart, c.headersPerFile, headerFileName)
 
-			err = c.cache.writeHeaders(headerFileName, fileStart, i)
+			err = c.writeHeaders(headerFileName, fileStart, i)
 			if err != nil {
 				return fmt.Errorf("error writing headers: %w",
 					err)
@@ -250,7 +271,7 @@ func (c *cFilterFiles) updateCacheAndFiles(startBlock, endBlock int32) error {
 				fileStart, c.headersPerFile,
 				filterHeaderFileName)
 
-			err = c.cache.writeFilterHeaders(
+			err = c.writeFilterHeaders(
 				filterHeaderFileName, fileStart, i,
 			)
 			if err != nil {
@@ -260,7 +281,7 @@ func (c *cFilterFiles) updateCacheAndFiles(startBlock, endBlock int32) error {
 
 			// We don't need the headers or filters anymore, so
 			// clear them out.
-			c.cache.clear()
+			c.clearData()
 		}
 
 		c.currentHeight.Store(i)
@@ -269,44 +290,7 @@ func (c *cFilterFiles) updateCacheAndFiles(startBlock, endBlock int32) error {
 	return nil
 }
 
-// cache is an in-memory cache of height to block hash, block headers, filter
-// headers and filters.
-type cache struct {
-	sync.RWMutex
-
-	headersPerFile int32
-	filtersPerFile int32
-
-	heightToHash  map[int32]chainhash.Hash
-	headers       map[chainhash.Hash]*wire.BlockHeader
-	filterHeaders map[chainhash.Hash]*chainhash.Hash
-	filters       map[chainhash.Hash][]byte
-}
-
-func newCache(headersPerFile, filtersPerFile int32) *cache {
-	c := &cache{
-		headersPerFile: headersPerFile,
-		filtersPerFile: filtersPerFile,
-	}
-	c.clear()
-
-	return c
-}
-
-func (c *cache) clear() {
-	c.Lock()
-	c.heightToHash = make(map[int32]chainhash.Hash, c.headersPerFile)
-	c.headers = make(
-		map[chainhash.Hash]*wire.BlockHeader, c.headersPerFile,
-	)
-	c.filterHeaders = make(
-		map[chainhash.Hash]*chainhash.Hash, c.headersPerFile,
-	)
-	c.filters = make(map[chainhash.Hash][]byte, c.filtersPerFile)
-	c.Unlock()
-}
-
-func (c *cache) writeHeaders(fileName string, startIndex,
+func (c *cFilterFiles) writeHeaders(fileName string, startIndex,
 	endIndex int32) error {
 
 	c.RLock()
@@ -332,22 +316,22 @@ func (c *cache) writeHeaders(fileName string, startIndex,
 	return nil
 }
 
-func (c *cache) serializeHeaders(w io.Writer, startIndex,
+func (c *cFilterFiles) serializeHeaders(w io.Writer, startIndex,
 	endIndex int32) error {
 
 	for j := startIndex; j <= endIndex; j++ {
-		hash, ok := c.heightToHash[j]
-		if !ok {
+		hash, err := c.h2hCache.getBlockHash(j)
+		if err != nil {
 			return fmt.Errorf("invalid height %d", j)
 		}
 
-		header, ok := c.headers[hash]
+		header, ok := c.headers[*hash]
 		if !ok {
 			return fmt.Errorf("missing header for hash %s (height "+
 				"%d)", hash.String(), j)
 		}
 
-		err := header.Serialize(w)
+		err = header.Serialize(w)
 		if err != nil {
 			return fmt.Errorf("error writing headers: %w", err)
 		}
@@ -356,7 +340,7 @@ func (c *cache) serializeHeaders(w io.Writer, startIndex,
 	return nil
 }
 
-func (c *cache) writeFilterHeaders(fileName string, startIndex,
+func (c *cFilterFiles) writeFilterHeaders(fileName string, startIndex,
 	endIndex int32) error {
 
 	c.RLock()
@@ -382,16 +366,16 @@ func (c *cache) writeFilterHeaders(fileName string, startIndex,
 	return nil
 }
 
-func (c *cache) serializeFilterHeaders(w io.Writer, startIndex,
+func (c *cFilterFiles) serializeFilterHeaders(w io.Writer, startIndex,
 	endIndex int32) error {
 
 	for j := startIndex; j <= endIndex; j++ {
-		hash, ok := c.heightToHash[j]
-		if !ok {
+		hash, err := c.h2hCache.getBlockHash(j)
+		if err != nil {
 			return fmt.Errorf("invalid height %d", j)
 		}
 
-		filterHeader, ok := c.filterHeaders[hash]
+		filterHeader, ok := c.filterHeaders[*hash]
 		if !ok {
 			return fmt.Errorf("missing filter header for hash %s "+
 				"(height %d)", hash.String(), j)
@@ -411,7 +395,7 @@ func (c *cache) serializeFilterHeaders(w io.Writer, startIndex,
 	return nil
 }
 
-func (c *cache) writeFilters(fileName string, startIndex,
+func (c *cFilterFiles) writeFilters(fileName string, startIndex,
 	endIndex int32) error {
 
 	c.RLock()
@@ -437,22 +421,22 @@ func (c *cache) writeFilters(fileName string, startIndex,
 	return nil
 }
 
-func (c *cache) serializeFilters(w io.Writer, startIndex,
+func (c *cFilterFiles) serializeFilters(w io.Writer, startIndex,
 	endIndex int32) error {
 
 	for j := startIndex; j <= endIndex; j++ {
-		hash, ok := c.heightToHash[j]
-		if !ok {
+		hash, err := c.h2hCache.getBlockHash(j)
+		if err != nil {
 			return fmt.Errorf("invalid height %d", j)
 		}
 
-		filter, ok := c.filters[hash]
+		filter, ok := c.filters[*hash]
 		if !ok {
 			return fmt.Errorf("missing filter for hash %s (height "+
 				"%d)", hash.String(), j)
 		}
 
-		err := wire.WriteVarBytes(w, 0, filter)
+		err = wire.WriteVarBytes(w, 0, filter)
 		if err != nil {
 			return fmt.Errorf("error writing filters: %w", err)
 		}

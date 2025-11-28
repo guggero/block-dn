@@ -38,7 +38,7 @@ type server struct {
 	startupComplete atomic.Bool
 	currentHeight   atomic.Int32
 
-	cache        *cache
+	h2hCache     *heightToHashCache
 	cFilterFiles *cFilterFiles
 
 	wg   sync.WaitGroup
@@ -61,7 +61,7 @@ func newServer(lightMode bool, baseDir, listenAddr string,
 		headersPerFile: headersPerFile,
 		filtersPerFile: filtersPerFile,
 
-		cache: newCache(headersPerFile, filtersPerFile),
+		h2hCache: newH2HCache(),
 
 		errs: fn.NewConcurrentQueue[error](2),
 		quit: make(chan struct{}),
@@ -81,7 +81,7 @@ func (s *server) start() error {
 
 	s.cFilterFiles = newCFilterFiles(
 		s.headersPerFile, s.filtersPerFile, s.chain, s.quit, s.baseDir,
-		s.chainParams, s.cache,
+		s.chainParams, s.h2hCache,
 	)
 
 	s.httpServer = &http.Server{
