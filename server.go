@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -61,8 +62,6 @@ func newServer(lightMode bool, baseDir, listenAddr string,
 		headersPerFile: headersPerFile,
 		filtersPerFile: filtersPerFile,
 
-		h2hCache: newH2HCache(),
-
 		errs: fn.NewConcurrentQueue[error](2),
 		quit: make(chan struct{}),
 	}
@@ -79,10 +78,42 @@ func (s *server) start() error {
 	}
 	s.chain = client
 
+	s.h2hCache = newH2HCache(client)
+
 	s.cFilterFiles = newCFilterFiles(
 		s.headersPerFile, s.filtersPerFile, s.chain, s.quit, s.baseDir,
 		s.chainParams, s.h2hCache,
 	)
+
+	// We preload all the headers into the height to hash cache on startup.
+	headersDir := filepath.Join(s.baseDir, HeaderFileDir)
+	cacheBestHeight, err := s.h2hCache.loadFromHeaders(headersDir)
+	if err != nil {
+		return fmt.Errorf("error loading headers into cache: %w", err)
+	}
+
+	// We also want to verify the current height on startup, if there were
+	// any headers loaded into the cache.
+	if cacheBestHeight >= 0 {
+		cacheBestBlock, err := s.h2hCache.getBlockHash(cacheBestHeight)
+		if err != nil {
+			return fmt.Errorf("error getting best block from "+
+				"cache: %w", err)
+		}
+
+		backendBlock, err := s.chain.GetBlockHash(
+			int64(cacheBestHeight),
+		)
+		if err != nil {
+			return fmt.Errorf("error getting best block from "+
+				"backend: %w", err)
+		}
+		if *backendBlock != *cacheBestBlock {
+			return fmt.Errorf("header mismatch at height %d: "+
+				"cache has %s, backend has %s", cacheBestHeight,
+				cacheBestBlock, backendBlock.String())
+		}
+	}
 
 	s.httpServer = &http.Server{
 		Addr:         s.listenAddr,

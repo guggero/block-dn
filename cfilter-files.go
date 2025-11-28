@@ -31,6 +31,7 @@ const (
 	HeaderFileDir = "headers"
 	FilterFileDir = "filters"
 
+	HeaderFileSuffix             = ".header"
 	HeaderFileNamePattern        = "%s/block-%07d-%07d.header"
 	FilterFileSuffix             = ".cfilter"
 	FilterFileNamePattern        = "%s/block-%07d-%07d.cfilter"
@@ -223,7 +224,6 @@ func (c *cFilterFiles) updateCacheAndFiles(startBlock, endBlock int32) error {
 		}
 
 		c.Lock()
-		c.h2hCache.addBlockHash(i, *hash)
 		c.headers[*hash] = header
 		c.filters[*hash] = filterBytes
 		c.filterHeaders[*hash] = filterHeader
@@ -445,21 +445,31 @@ func (c *cFilterFiles) serializeFilters(w io.Writer, startIndex,
 	return nil
 }
 
-func lastFile(fileDir, searchPattern string,
-	extractPattern *regexp.Regexp) (int32, error) {
-
+func listFiles(fileDir, searchPattern string) ([]string, error) {
 	globPattern := fmt.Sprintf("%s/*%s", fileDir, searchPattern)
 	files, err := filepath.Glob(globPattern)
 	if err != nil {
-		return 0, fmt.Errorf("error listing files '%s' in %s: %w",
+		return nil, fmt.Errorf("error listing files '%s' in %s: %w",
 			globPattern, fileDir, err)
+	}
+
+	sort.Strings(files)
+
+	return files, nil
+}
+
+func lastFile(fileDir, searchPattern string,
+	extractPattern *regexp.Regexp) (int32, error) {
+
+	files, err := listFiles(fileDir, searchPattern)
+	if err != nil {
+		return 0, err
 	}
 
 	if len(files) == 0 {
 		return 0, nil
 	}
 
-	sort.Strings(files)
 	last := files[len(files)-1]
 	matches := extractPattern.FindStringSubmatch(last)
 	if len(matches) != 2 || matches[1] == "" {
