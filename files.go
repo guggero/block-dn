@@ -39,8 +39,11 @@ func (c *cache) clear() {
 	c.Unlock()
 }
 
-func newCache() *cache {
-	c := &cache{}
+func newCache(headersPerFile, filtersPerFile int32) *cache {
+	c := &cache{
+		headersPerFile: headersPerFile,
+		filtersPerFile: filtersPerFile,
+	}
 	c.clear()
 
 	return c
