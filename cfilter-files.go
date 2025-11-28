@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -8,9 +9,14 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/btcsuite/btcd/btcjson"
+	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/wire"
 )
 
@@ -40,6 +46,265 @@ var (
 		FilterFileNameExtractPattern,
 	)
 )
+
+type cFilterFiles struct {
+	quit <-chan struct{}
+
+	cache *cache
+
+	headersPerFile int32
+	filtersPerFile int32
+	baseDir        string
+	chain          *rpcclient.Client
+	chainParams    *chaincfg.Params
+
+	startupComplete atomic.Bool
+	currentHeight   atomic.Int32
+}
+
+func newCFilterFiles(headersPerFile, filtersPerFile int32,
+	chain *rpcclient.Client, quit <-chan struct{}, baseDir string,
+	chainParams *chaincfg.Params, cache *cache) *cFilterFiles {
+
+	return &cFilterFiles{
+		quit:           quit,
+		cache:          cache,
+		headersPerFile: headersPerFile,
+		filtersPerFile: filtersPerFile,
+		baseDir:        baseDir,
+		chain:          chain,
+		chainParams:    chainParams,
+	}
+}
+
+// updateFiles updates the header and filter files on disk.
+//
+// NOTE: Must be called as a goroutine.
+func (c *cFilterFiles) updateFiles() error {
+	log.Debugf("Updating filter files in %s for network %s", c.baseDir,
+		c.chainParams.Name)
+
+	info, err := c.chain.GetBlockChainInfo()
+	if err != nil {
+		return fmt.Errorf("error getting block chain info: %w", err)
+	}
+
+	headerDir := filepath.Join(c.baseDir, HeaderFileDir)
+	err = os.MkdirAll(headerDir, DirectoryMode)
+	if err != nil {
+		return fmt.Errorf("error creating directory %s: %w", headerDir,
+			err)
+	}
+	filterDir := filepath.Join(c.baseDir, FilterFileDir)
+	err = os.MkdirAll(filterDir, DirectoryMode)
+	if err != nil {
+		return fmt.Errorf("error creating directory %s: %w", filterDir,
+			err)
+	}
+
+	log.Debugf("Best block hash: %s, height: %d", info.BestBlockHash,
+		info.Blocks)
+
+	startBlock, err := lastFile(
+		filterDir, FilterFileSuffix, filterFileNameExtractRegex,
+	)
+	if err != nil {
+		return fmt.Errorf("error getting last filter file: %w", err)
+	}
+
+	log.Debugf("Found last filter file at block %d", startBlock)
+
+	// For the headers, we need a bigger range, so drop down the start block
+	// to the last header file.
+	startBlock = (startBlock / c.headersPerFile) * c.headersPerFile
+	log.Debugf("Need to start fetching headers and filters from block %d",
+		startBlock)
+
+	log.Debugf("Writing header files from block %d to block %d", startBlock,
+		info.Blocks)
+	err = c.updateCacheAndFiles(startBlock, info.Blocks)
+	if err != nil {
+		return fmt.Errorf("error updating blocks: %w", err)
+	}
+
+	// Allow serving requests now that we're caught up.
+	c.startupComplete.Store(true)
+
+	// Let's now go into the infinite loop of updating the filter files
+	// whenever a new block is mined.
+	log.Debugf("Caught up headers and filters to best block %d, starting "+
+		"to poll for new blocks", info.Blocks)
+	for {
+		select {
+		case <-time.After(blockPollInterval):
+		case <-c.quit:
+			return errServerShutdown
+		}
+
+		height, err := c.chain.GetBlockCount()
+		if err != nil {
+			return fmt.Errorf("error getting best block: %w", err)
+		}
+
+		currentBlock := c.currentHeight.Load()
+		if int32(height) == currentBlock {
+			continue
+		}
+
+		log.Infof("Processing headers and filters for new block mined "+
+			"at height %d", height)
+		err = c.updateCacheAndFiles(currentBlock+1, int32(height))
+		if err != nil {
+			return fmt.Errorf("error updating headers and filters "+
+				"for blocks: %w", err)
+		}
+	}
+}
+
+func (c *cFilterFiles) updateCacheAndFiles(startBlock, endBlock int32) error {
+	headerDir := filepath.Join(c.baseDir, HeaderFileDir)
+	filterDir := filepath.Join(c.baseDir, FilterFileDir)
+
+	for i := startBlock; i <= endBlock; i++ {
+		// Were we interrupted?
+		select {
+		case <-c.quit:
+			return errServerShutdown
+		default:
+		}
+
+		hash, err := c.chain.GetBlockHash(int64(i))
+		if err != nil {
+			return fmt.Errorf("error getting block hash for "+
+				"height %d: %w", i, err)
+		}
+
+		header, err := c.chain.GetBlockHeader(hash)
+		if err != nil {
+			return fmt.Errorf("error getting block header for "+
+				"hash %s: %w", hash, err)
+		}
+
+		filter, err := c.chain.GetBlockFilter(*hash, &filterBasic)
+		if err != nil {
+			return fmt.Errorf("error getting block filter for "+
+				"hash %s: %w", hash, err)
+		}
+		filterHeader, err := chainhash.NewHashFromStr(filter.Header)
+		if err != nil {
+			return fmt.Errorf("error parsing filter header for "+
+				"hash %s: %w", hash, err)
+		}
+		filterBytes, err := hex.DecodeString(filter.Filter)
+		if err != nil {
+			return fmt.Errorf("error parsing filter bytes for "+
+				"hash %s: %w", hash, err)
+		}
+
+		c.cache.Lock()
+		c.cache.heightToHash[i] = *hash
+		c.cache.headers[*hash] = header
+		c.cache.filters[*hash] = filterBytes
+		c.cache.filterHeaders[*hash] = filterHeader
+		c.cache.Unlock()
+
+		if (i+1)%c.filtersPerFile == 0 {
+			fileStart := i - c.filtersPerFile + 1
+			filterFileName := fmt.Sprintf(
+				FilterFileNamePattern, filterDir, fileStart, i,
+			)
+
+			log.Debugf("Reached header %d, writing file starting "+
+				"at %d, containing %d filters to %s", i,
+				fileStart, c.filtersPerFile, filterFileName)
+
+			err = c.cache.writeFilters(filterFileName, fileStart, i)
+			if err != nil {
+				return fmt.Errorf("error writing filters: %w",
+					err)
+			}
+		}
+
+		if (i+1)%c.headersPerFile == 0 {
+			fileStart := i - c.headersPerFile + 1
+			headerFileName := fmt.Sprintf(
+				HeaderFileNamePattern, headerDir, fileStart, i,
+			)
+			filterHeaderFileName := fmt.Sprintf(
+				FilterHeaderFileNamePattern, headerDir,
+				fileStart, i,
+			)
+
+			log.Debugf("Reached header %d, writing file starting "+
+				"at %d, containing %d headers to %s", i,
+				fileStart, c.headersPerFile, headerFileName)
+
+			err = c.cache.writeHeaders(headerFileName, fileStart, i)
+			if err != nil {
+				return fmt.Errorf("error writing headers: %w",
+					err)
+			}
+
+			log.Debugf("Reached header %d, writing file starting "+
+				"at %d, containing %d filter headers to %s", i,
+				fileStart, c.headersPerFile,
+				filterHeaderFileName)
+
+			err = c.cache.writeFilterHeaders(
+				filterHeaderFileName, fileStart, i,
+			)
+			if err != nil {
+				return fmt.Errorf("error writing filter "+
+					"headers: %w", err)
+			}
+
+			// We don't need the headers or filters anymore, so
+			// clear them out.
+			c.cache.clear()
+		}
+
+		c.currentHeight.Store(i)
+	}
+
+	return nil
+}
+
+// cache is an in-memory cache of height to block hash, block headers, filter
+// headers and filters.
+type cache struct {
+	sync.RWMutex
+
+	headersPerFile int32
+	filtersPerFile int32
+
+	heightToHash  map[int32]chainhash.Hash
+	headers       map[chainhash.Hash]*wire.BlockHeader
+	filterHeaders map[chainhash.Hash]*chainhash.Hash
+	filters       map[chainhash.Hash][]byte
+}
+
+func newCache(headersPerFile, filtersPerFile int32) *cache {
+	c := &cache{
+		headersPerFile: headersPerFile,
+		filtersPerFile: filtersPerFile,
+	}
+	c.clear()
+
+	return c
+}
+
+func (c *cache) clear() {
+	c.Lock()
+	c.heightToHash = make(map[int32]chainhash.Hash, c.headersPerFile)
+	c.headers = make(
+		map[chainhash.Hash]*wire.BlockHeader, c.headersPerFile,
+	)
+	c.filterHeaders = make(
+		map[chainhash.Hash]*chainhash.Hash, c.headersPerFile,
+	)
+	c.filters = make(map[chainhash.Hash][]byte, c.filtersPerFile)
+	c.Unlock()
+}
 
 func (c *cache) writeHeaders(fileName string, startIndex,
 	endIndex int32) error {

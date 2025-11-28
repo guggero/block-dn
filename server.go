@@ -38,7 +38,8 @@ type server struct {
 	startupComplete atomic.Bool
 	currentHeight   atomic.Int32
 
-	cache *cache
+	cache        *cache
+	cFilterFiles *cFilterFiles
 
 	wg   sync.WaitGroup
 	errs *fn.ConcurrentQueue[error]
@@ -78,6 +79,11 @@ func (s *server) start() error {
 	}
 	s.chain = client
 
+	s.cFilterFiles = newCFilterFiles(
+		s.headersPerFile, s.filtersPerFile, s.chain, s.quit, s.baseDir,
+		s.chainParams, s.cache,
+	)
+
 	s.httpServer = &http.Server{
 		Addr:         s.listenAddr,
 		Handler:      s.router,
@@ -115,7 +121,7 @@ func (s *server) start() error {
 		}()
 
 		log.Infof("Starting background filter file update")
-		err := s.updateFiles()
+		err := s.cFilterFiles.updateFiles()
 		if err != nil && !errors.Is(err, errServerShutdown) {
 			log.Errorf("Error updating files: %v", err)
 			s.errs.ChanIn() <- err
