@@ -40,6 +40,7 @@ type mainCommand struct {
 
 	baseDir   string
 	logDir    string
+	logLevel  string
 	indexPage string
 
 	listenAddr string
@@ -111,7 +112,7 @@ func main() {
 				filtersPerFile = DefaultRegtestFiltersPerFile
 			}
 
-			setupLogging(cc.logDir)
+			setupLogging(cc.logDir, cc.logLevel)
 			log.Infof("block-dn version v%s commit %s", version,
 				Commit)
 
@@ -199,6 +200,10 @@ func main() {
 			"log file will be written",
 	)
 	cc.cmd.PersistentFlags().StringVar(
+		&cc.logLevel, "log-level", "info", "The log level for the "+
+			"logger: debug, info, warn, error, critical",
+	)
+	cc.cmd.PersistentFlags().StringVar(
 		&cc.indexPage, "index-page", "", "Full path to the index.html "+
 			"that should be used instead of the default one that "+
 			"comes with the project",
@@ -233,7 +238,7 @@ func main() {
 	}
 }
 
-func setupLogging(logDir string) {
+func setupLogging(logDir, logLevel string) {
 	logConfig := build.DefaultLogConfig()
 	logWriter := build.NewRotatingLogWriter()
 	logMgr = build.NewSubLoggerManager(build.NewDefaultLogHandlers(
@@ -248,7 +253,7 @@ func setupLogging(logDir string) {
 	if err != nil {
 		panic(err)
 	}
-	err = build.ParseAndSetDebugLevels("debug", logMgr)
+	err = build.ParseAndSetDebugLevels(logLevel, logMgr)
 	if err != nil {
 		panic(err)
 	}

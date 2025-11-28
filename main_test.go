@@ -619,7 +619,7 @@ func TestBlockDN(t *testing.T) {
 	dataDir := t.TempDir()
 	listenAddr := fmt.Sprintf("127.0.0.1:%d", port.NextAvailablePort())
 
-	setupLogging(testDir)
+	setupLogging(testDir, "debug")
 	testServer := newServer(
 		false, dataDir, listenAddr, &backendCfg, unittest.NetParams, 6,
 		DefaultRegtestHeadersPerFile, DefaultRegtestFiltersPerFile,
