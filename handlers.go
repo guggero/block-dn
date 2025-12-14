@@ -46,6 +46,12 @@ var (
 		"endpoint not available in light mode",
 	)
 
+	// errUnavailableSPTweakDataTurnedOff is an error indicating that the SP
+	// tweak data indexing is turned off.
+	errUnavailableSPTweakDataTurnedOff = errors.New(
+		"SP tweak data indexing is turned off",
+	)
+
 	// errStillStartingUp is an error indicating that the server is still
 	// starting up and not ready to serve requests yet.
 	errStillStartingUp = errors.New(
@@ -153,6 +159,15 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
+	var (
+		spHeight int32
+		spSynced bool
+	)
+	if s.spTweakFiles != nil {
+		spHeight = s.spTweakFiles.currentHeight.Load()
+		spSynced = bestHeight == spHeight
+	}
+
 	status := &Status{
 		ChainGenesisHash:      s.chainParams.GenesisHash.String(),
 		ChainName:             s.chainParams.Name,
@@ -160,7 +175,7 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 		BestBlockHash:         bestBlock.String(),
 		BestFilterHeight:      s.cFilterFiles.currentHeight.Load(),
 		BestFilterHeader:      bestFilter.String(),
-		BestSPTweakHeight:     s.spTweakFiles.currentHeight.Load(),
+		BestSPTweakHeight:     spHeight,
 		EntriesPerHeaderFile:  s.headersPerFile,
 		EntriesPerFilterFile:  s.filtersPerFile,
 		EntriesPerSPTweakFile: s.spTweaksPerFile,
@@ -168,7 +183,7 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 
 	// nolint:gocritic
 	status.AllFilesSynced = bestHeight == status.BestFilterHeight &&
-		bestHeight == status.BestSPTweakHeight
+		spSynced
 
 	sendJSON(w, status, maxAgeMemory)
 }
@@ -220,6 +235,11 @@ func (s *server) filtersRequestHandler(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) spTweakDataRequestHandler(w http.ResponseWriter,
 	r *http.Request) {
+
+	if s.spTweakFiles == nil {
+		sendError(w, status503, errUnavailableSPTweakDataTurnedOff)
+		return
+	}
 
 	s.heightBasedRequestHandler(
 		w, r, SPTweakFileDir, SPTweakFileNamePattern,
