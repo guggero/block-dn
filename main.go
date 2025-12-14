@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	version = "1.1.3"
+	version = "1.2.0"
 
 	defaultListenPort = 8080
 
