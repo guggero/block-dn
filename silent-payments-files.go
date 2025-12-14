@@ -376,7 +376,7 @@ func (s *spTweakFiles) indexBlockSPTweakData(height int32,
 
 		s.prevOutCache.RemoveInputs(tx)
 		if tweakPubKey == nil {
-			s.prevOutCache.RemoveInputs(tx)
+			continue
 		}
 
 		// Store the tweak data for this transaction index.
