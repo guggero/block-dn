@@ -90,6 +90,11 @@ type serializable interface {
 	Serialize(w io.Writer) error
 }
 
+type blockProcessor interface {
+	isStartupComplete() bool
+	getCurrentHeight() int32
+}
+
 func (s *server) createRouter() *mux.Router {
 	router := mux.NewRouter()
 	router.HandleFunc("/", s.indexRequestHandler)
@@ -109,6 +114,10 @@ func (s *server) createRouter() *mux.Router {
 		s.filterHeadersImportRequestHandler,
 	)
 	router.HandleFunc("/filters/{height:[0-9]+}", s.filtersRequestHandler)
+	router.HandleFunc(
+		"/sp/tweak-data/{height:[0-9]+}",
+		s.spTweakDataRequestHandler,
+	)
 	router.HandleFunc("/block/{hash:[0-9a-f]+}", s.blockRequestHandler)
 	router.HandleFunc(
 		"/tx/out-proof/{txid:[0-9a-f]+}", s.txOutProofRequestHandler,
@@ -128,31 +137,38 @@ func (s *server) indexRequestHandler(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
-	s.cache.RLock()
-	defer s.cache.RUnlock()
+	s.h2hCache.RLock()
+	defer s.h2hCache.RUnlock()
 
-	bestHeight := s.currentHeight.Load()
-	bestBlock, ok := s.cache.heightToHash[bestHeight]
-	if !ok {
+	bestHeight := s.headerFiles.getCurrentHeight()
+	bestBlock, err := s.h2hCache.getBlockHash(bestHeight)
+	if err != nil {
 		sendError(w, status500, errInvalidSyncStatus)
 		return
 	}
 
-	bestFilter, ok := s.cache.filterHeaders[bestBlock]
+	bestFilter, ok := s.headerFiles.filterHeaders[*bestBlock]
 	if !ok {
 		sendError(w, status500, errInvalidSyncStatus)
 		return
 	}
 
 	status := &Status{
-		ChainGenesisHash: s.chainParams.GenesisHash.String(),
-		ChainName:        s.chainParams.Name,
-		BestBlockHeight:  bestHeight,
-		BestBlockHash:    bestBlock.String(),
-		BestFilterHeader: bestFilter.String(),
-		EntriesPerHeader: s.headersPerFile,
-		EntriesPerFilter: s.filtersPerFile,
+		ChainGenesisHash:      s.chainParams.GenesisHash.String(),
+		ChainName:             s.chainParams.Name,
+		BestBlockHeight:       bestHeight,
+		BestBlockHash:         bestBlock.String(),
+		BestFilterHeight:      s.cFilterFiles.currentHeight.Load(),
+		BestFilterHeader:      bestFilter.String(),
+		BestSPTweakHeight:     s.spTweakFiles.currentHeight.Load(),
+		EntriesPerHeaderFile:  s.headersPerFile,
+		EntriesPerFilterFile:  s.filtersPerFile,
+		EntriesPerSPTweakFile: s.spTweaksPerFile,
 	}
+
+	// nolint:gocritic
+	status.AllFilesSynced = bestHeight == status.BestFilterHeight &&
+		bestHeight == status.BestSPTweakHeight
 
 	sendJSON(w, status, maxAgeMemory)
 }
@@ -160,7 +176,8 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 func (s *server) headersRequestHandler(w http.ResponseWriter, r *http.Request) {
 	s.heightBasedRequestHandler(
 		w, r, HeaderFileDir, HeaderFileNamePattern,
-		int64(s.headersPerFile), s.cache.serializeHeaders,
+		int64(s.headersPerFile), s.headerFiles.serializeHeaders,
+		s.headerFiles,
 	)
 }
 
@@ -168,8 +185,8 @@ func (s *server) headersImportRequestHandler(w http.ResponseWriter,
 	r *http.Request) {
 
 	s.heightBasedImportRequestHandler(
-		w, r, HeaderFileDir, HeaderFileNamePattern,
-		s.headersPerFile, s.cache.serializeHeaders, typeBlockHeader,
+		w, r, HeaderFileDir, HeaderFileNamePattern, s.headersPerFile,
+		s.headerFiles.serializeHeaders, typeBlockHeader,
 	)
 }
 
@@ -178,7 +195,8 @@ func (s *server) filterHeadersRequestHandler(w http.ResponseWriter,
 
 	s.heightBasedRequestHandler(
 		w, r, HeaderFileDir, FilterHeaderFileNamePattern,
-		int64(s.headersPerFile), s.cache.serializeFilterHeaders,
+		int64(s.headersPerFile), s.headerFiles.serializeFilterHeaders,
+		s.headerFiles,
 	)
 }
 
@@ -187,7 +205,7 @@ func (s *server) filterHeadersImportRequestHandler(w http.ResponseWriter,
 
 	s.heightBasedImportRequestHandler(
 		w, r, HeaderFileDir, FilterHeaderFileNamePattern,
-		s.headersPerFile, s.cache.serializeFilterHeaders,
+		s.headersPerFile, s.headerFiles.serializeFilterHeaders,
 		typeFilterHeader,
 	)
 }
@@ -195,13 +213,25 @@ func (s *server) filterHeadersImportRequestHandler(w http.ResponseWriter,
 func (s *server) filtersRequestHandler(w http.ResponseWriter, r *http.Request) {
 	s.heightBasedRequestHandler(
 		w, r, FilterFileDir, FilterFileNamePattern,
-		int64(s.filtersPerFile), s.cache.serializeFilters,
+		int64(s.filtersPerFile), s.cFilterFiles.serializeFilters,
+		s.cFilterFiles,
+	)
+}
+
+func (s *server) spTweakDataRequestHandler(w http.ResponseWriter,
+	r *http.Request) {
+
+	s.heightBasedRequestHandler(
+		w, r, SPTweakFileDir, SPTweakFileNamePattern,
+		int64(s.spTweaksPerFile), s.spTweakFiles.serializeSPTweakData,
+		s.spTweakFiles,
 	)
 }
 
 func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 	r *http.Request, subDir, fileNamePattern string, entriesPerFile int64,
-	serializeCb func(w io.Writer, startIndex, endIndex int32) error) {
+	serializeCb func(w io.Writer, startIndex, endIndex int32) error,
+	processor blockProcessor) {
 
 	// These kinds of requests aren't available in light mode.
 	if s.lightMode {
@@ -209,7 +239,7 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 		return
 	}
 
-	if !s.startupComplete.Load() {
+	if !processor.isStartupComplete() {
 		sendError(w, status503, errStillStartingUp)
 		return
 	}
@@ -220,7 +250,7 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 		return
 	}
 
-	err = s.checkStartHeight(startHeight, int32(entriesPerFile))
+	err = s.checkStartHeight(processor, startHeight, int32(entriesPerFile))
 	if err != nil {
 		sendError(w, status400, err)
 		return
@@ -243,10 +273,10 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 		return
 	}
 
-	s.cache.RLock()
-	defer s.cache.RUnlock()
+	s.h2hCache.RLock()
+	defer s.h2hCache.RUnlock()
 
-	if _, ok := s.cache.heightToHash[int32(startHeight)]; !ok {
+	if _, err := s.h2hCache.getBlockHash(int32(startHeight)); err != nil {
 		sendError(w, status400, fmt.Errorf("invalid height"))
 		return
 	}
@@ -256,7 +286,7 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 	addCorsHeaders(w)
 	addCacheHeaders(w, maxAgeMemory)
 	w.WriteHeader(http.StatusOK)
-	err = serializeCb(w, int32(startHeight), s.currentHeight.Load())
+	err = serializeCb(w, int32(startHeight), processor.getCurrentHeight())
 	if err != nil {
 		log.Errorf("Error serializing: %v", err)
 	}
@@ -273,7 +303,7 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 		return
 	}
 
-	if !s.startupComplete.Load() {
+	if !s.headerFiles.startupComplete.Load() {
 		sendError(w, status503, errStillStartingUp)
 		return
 	}
@@ -284,7 +314,8 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 		return
 	}
 
-	if err := s.checkEndHeight(endHeight, entriesPerFile); err != nil {
+	err = s.checkEndHeight(s.headerFiles, endHeight, entriesPerFile)
+	if err != nil {
 		sendError(w, status400, err)
 		return
 	}
@@ -297,7 +328,8 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 	// We also check that we don't need to server partial content from
 	// files, as that would make things a bit more tricky.
 	maxCacheFileEndHeight := int64(
-		(s.currentHeight.Load() / entriesPerFile) * entriesPerFile,
+		(s.headerFiles.currentHeight.Load() / entriesPerFile) *
+			entriesPerFile,
 	)
 
 	// We don't want to return partial files. So for any range that can be
@@ -360,10 +392,10 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 		}
 	}
 
-	s.cache.RLock()
-	defer s.cache.RUnlock()
+	s.h2hCache.RLock()
+	defer s.h2hCache.RUnlock()
 
-	if _, ok := s.cache.heightToHash[int32(lastHeight)]; !ok {
+	if _, err := s.h2hCache.getBlockHash(int32(lastHeight)); err != nil {
 		sendError(w, status400, fmt.Errorf("invalid height"))
 		return
 	}
@@ -428,7 +460,8 @@ func (s *server) txOutProofRequestHandler(w http.ResponseWriter,
 	}
 
 	maxAge := maxAgeDisk
-	safeHeight := s.currentHeight.Load() - int32(s.reOrgSafeDepth)
+	safeHeight := s.headerFiles.currentHeight.Load() -
+		int32(s.reOrgSafeDepth)
 	if verboseHeader.Height > safeHeight {
 		maxAge = maxAgeTemporary
 	}
@@ -453,10 +486,12 @@ func (s *server) rawTxRequestHandler(w http.ResponseWriter, r *http.Request) {
 	sendBinary(w, tx.MsgTx(), maxAgeDisk)
 }
 
-func (s *server) checkStartHeight(height int64, entriesPerFile int32) error {
-	if int32(height) > s.currentHeight.Load() {
+func (s *server) checkStartHeight(processor blockProcessor, height int64,
+	entriesPerFile int32) error {
+
+	if int32(height) > processor.getCurrentHeight() {
 		return fmt.Errorf("start height %d is greater than current "+
-			"height %d", height, s.currentHeight.Load())
+			"height %d", height, processor.getCurrentHeight())
 	}
 
 	if height != 0 && height%int64(entriesPerFile) != 0 {
@@ -467,10 +502,12 @@ func (s *server) checkStartHeight(height int64, entriesPerFile int32) error {
 	return nil
 }
 
-func (s *server) checkEndHeight(height int64, entriesPerFile int32) error {
-	if int32(height) > s.currentHeight.Load() {
+func (s *server) checkEndHeight(processor blockProcessor, height int64,
+	entriesPerFile int32) error {
+
+	if int32(height) > processor.getCurrentHeight() {
 		return fmt.Errorf("end height %d is greater than current "+
-			"height %d", height, s.currentHeight.Load())
+			"height %d", height, processor.getCurrentHeight())
 	}
 
 	if height == 0 {

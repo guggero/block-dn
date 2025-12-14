@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,9 +15,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil/psbt"
+	sp "github.com/btcsuite/btcd/btcutil/silentpayments"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/rpcclient"
+	"github.com/btcsuite/btcd/wire"
+	"github.com/btcsuite/btcwallet/chain"
 	lntestminer "github.com/lightningnetwork/lnd/lntest/miner"
 	"github.com/lightningnetwork/lnd/lntest/port"
 	"github.com/lightningnetwork/lnd/lntest/unittest"
@@ -25,7 +31,7 @@ import (
 )
 
 const (
-	numStartupBlocks = 100
+	numStartupBlocks = 50
 
 	// numInitialBlocks is the number of blocks we mine for testing. In
 	// regtest mode, when using btcd as a miner, we can only mine blocks in
@@ -41,16 +47,21 @@ const (
 	cacheTemporary = "max-age=1"
 	cacheMemory    = "max-age=60"
 	cacheDisk      = "max-age=31536000"
+
+	unitTestDir = ".unit-test-logs"
 )
 
 var (
-	syncTimeout = 2 * time.Minute
-	testTimeout = 60 * time.Second
+	syncTimeout  = 2 * time.Minute
+	testTimeout  = 60 * time.Second
+	shortTimeout = 5 * time.Second
 
 	testParams = chaincfg.RegressionNetParams
 
-	totalInitialBlocks = numStartupBlocks + testParams.CoinbaseMaturity +
-		numInitialBlocks
+	totalStartupBlocks = numStartupBlocks +
+		uint32(testParams.CoinbaseMaturity) +
+		testParams.MinerConfirmationWindow*2
+	totalInitialBlocks = totalStartupBlocks + numInitialBlocks
 )
 
 type testContext struct {
@@ -116,6 +127,68 @@ func (ctx *testContext) bestBlock(t *testing.T) (int32, chainhash.Hash) {
 	return int32(height), *blockHash
 }
 
+func (ctx *testContext) blockAtHeight(t *testing.T,
+	height int32) *wire.MsgBlock {
+
+	hash, err := ctx.backend.GetBlockHash(int64(height))
+	require.NoError(t, err)
+
+	block, err := ctx.backend.GetBlock(hash)
+	require.NoError(t, err)
+
+	return block
+}
+
+func (ctx *testContext) fetchPrevOutScript(op wire.OutPoint) ([]byte, error) {
+	tx, err := ctx.backend.GetRawTransaction(&op.Hash)
+	if err != nil {
+		return nil, fmt.Errorf("error fetching previous "+
+			"transaction: %w", err)
+	}
+
+	if int(op.Index) >= len(tx.MsgTx().TxOut) {
+		return nil, fmt.Errorf("output index %d out of range for "+
+			"transaction %s", op.Index, op.Hash.String())
+	}
+
+	return tx.MsgTx().TxOut[op.Index].PkScript, nil
+}
+
+func (ctx *testContext) waitBackendSync(t *testing.T) {
+	waitBackendSync(t, ctx.backend, ctx.miner)
+}
+
+func (ctx *testContext) waitFilesSync(t *testing.T) {
+	err := wait.NoError(func() error {
+		headerHeight := ctx.server.headerFiles.getCurrentHeight()
+		_, minerHeight, err := ctx.miner.Client.GetBestBlock()
+		if err != nil {
+			return fmt.Errorf("unable to get miner height: %w", err)
+		}
+
+		if minerHeight != headerHeight {
+			return fmt.Errorf("expected height %d, got %d",
+				minerHeight, headerHeight)
+		}
+
+		if headerHeight != ctx.server.cFilterFiles.getCurrentHeight() {
+			return fmt.Errorf("cfilter height mismatch: %d vs %d",
+				ctx.server.cFilterFiles.getCurrentHeight(),
+				headerHeight)
+		}
+
+		if headerHeight != ctx.server.spTweakFiles.getCurrentHeight() {
+			return fmt.Errorf("sp tweak data height mismatch: %d "+
+				"vs %d",
+				ctx.server.spTweakFiles.getCurrentHeight(),
+				headerHeight)
+		}
+
+		return nil
+	}, syncTimeout)
+	require.NoError(t, err)
+}
+
 type testFunc func(t *testing.T, ctx *testContext)
 
 var testCases = []struct {
@@ -149,6 +222,10 @@ var testCases = []struct {
 	{
 		name: "filter-headers-import",
 		fn:   testFilterHeadersImport,
+	},
+	{
+		name: "sp-tweak-data",
+		fn:   testSPTweakData,
 	},
 	{
 		name: "tx-out-proof",
@@ -293,10 +370,13 @@ func testStatus(t *testing.T, ctx *testContext) {
 		t, testParams.GenesisHash.String(), status.ChainGenesisHash,
 	)
 	require.Equal(
-		t, ctx.server.headersPerFile, status.EntriesPerHeader,
+		t, ctx.server.headersPerFile, status.EntriesPerHeaderFile,
 	)
 	require.Equal(
-		t, ctx.server.filtersPerFile, status.EntriesPerFilter,
+		t, ctx.server.filtersPerFile, status.EntriesPerFilterFile,
+	)
+	require.Equal(
+		t, ctx.server.spTweaksPerFile, status.EntriesPerSPTweakFile,
 	)
 
 	require.Contains(t, headers, HeaderCache)
@@ -305,7 +385,12 @@ func testStatus(t *testing.T, ctx *testContext) {
 
 	height, blockHash := ctx.bestBlock(t)
 	require.Equal(t, height, status.BestBlockHeight)
+	require.Equal(t, height, status.BestFilterHeight)
+	require.Equal(t, height, status.BestSPTweakHeight)
 	require.Equal(t, blockHash.String(), status.BestBlockHash)
+
+	filterHeader := ctx.server.headerFiles.filterHeaders[blockHash]
+	require.Equal(t, filterHeader.String(), status.BestFilterHeader)
 }
 
 func testHeaders(t *testing.T, ctx *testContext) {
@@ -388,7 +473,7 @@ func testHeadersImport(t *testing.T, ctx *testContext) {
 	require.Equal(t, "*", headers.Get(HeaderCORS))
 
 	// We make sure that the last 10 entries are actually correct.
-	lastHeight := ctx.server.currentHeight.Load()
+	lastHeight := ctx.server.headerFiles.getCurrentHeight()
 	require.Equal(t, int32(totalInitialBlocks), lastHeight)
 	for height := lastHeight - 9; height <= lastHeight; height++ {
 		start := importMetadataSize + int(height)*headerSize
@@ -494,7 +579,7 @@ func testFilterHeadersImport(t *testing.T, ctx *testContext) {
 	require.Equal(t, "*", headers.Get(HeaderCORS))
 
 	// We make sure that the last 10 entries are actually correct.
-	lastHeight := ctx.server.currentHeight.Load()
+	lastHeight := ctx.server.headerFiles.getCurrentHeight()
 	require.Equal(t, int32(totalInitialBlocks), lastHeight)
 	for height := lastHeight - 9; height <= lastHeight; height++ {
 		start := importMetadataSize + int(height)*filterHeadersSize
@@ -517,6 +602,121 @@ func testFilterHeadersImport(t *testing.T, ctx *testContext) {
 			"filter header at height %d does not match", height,
 		)
 	}
+}
+
+func testSPTweakData(t *testing.T, ctx *testContext) {
+	var spTweakData SPTweakFile
+	headers := ctx.fetchJSON(t, "sp/tweak-data/0", &spTweakData)
+	require.Equal(t, int32(0), spTweakData.StartHeight)
+	require.Equal(
+		t, int32(DefaultRegtestSPTweaksPerFile), spTweakData.NumBlocks,
+	)
+	require.Len(t, spTweakData.Blocks, int(spTweakData.NumBlocks))
+
+	require.Contains(t, headers, HeaderCache)
+	require.Equal(t, cacheDisk, headers.Get(HeaderCache))
+	require.Equal(t, "*", headers.Get(HeaderCORS))
+
+	// And now we try to fetch all SP tweak data up to the current height,
+	// which will require some of them to be served from memory.
+	const startHeight = DefaultRegtestSPTweaksPerFile
+	headers = ctx.fetchJSON(
+		t, fmt.Sprintf("sp/tweak-data/%d", startHeight), &spTweakData,
+	)
+	expectedBlocks := totalInitialBlocks - startHeight + 1
+	require.Equal(
+		t, int32(expectedBlocks), spTweakData.NumBlocks,
+	)
+	require.Len(t, spTweakData.Blocks, int(expectedBlocks))
+
+	require.Contains(t, headers, HeaderCache)
+	require.Equal(t, cacheMemory, headers.Get(HeaderCache))
+	require.Equal(t, "*", headers.Get(HeaderCORS))
+
+	// Now we mine some blocks with Taproot outputs to ensure we have
+	// Taproot tweaks in the SP tweak data.
+	numTrBlocks := uint32(20)
+	for range numTrBlocks {
+		ctx.miner.SendOutput(&wire.TxOut{
+			Value:    5_000,
+			PkScript: psbt.SilentPaymentDummyP2TROutput,
+		}, 2)
+		ctx.miner.SendOutput(&wire.TxOut{
+			Value:    5_000,
+			PkScript: psbt.SilentPaymentDummyP2TROutput,
+		}, 2)
+		ctx.miner.MineBlocksAndAssertNumTxes(1, 2)
+	}
+
+	ctx.waitBackendSync(t)
+	ctx.waitFilesSync(t)
+
+	headers = ctx.fetchJSON(
+		t, fmt.Sprintf("sp/tweak-data/%d", startHeight), &spTweakData,
+	)
+	expectedHeight := totalInitialBlocks + numTrBlocks
+	expectedBlocks = expectedHeight - DefaultRegtestSPTweaksPerFile + 1
+	require.Equal(
+		t, int32(expectedBlocks), spTweakData.NumBlocks,
+	)
+	require.Len(t, spTweakData.Blocks, int(expectedBlocks))
+
+	require.Contains(t, headers, HeaderCache)
+	require.Equal(t, cacheMemory, headers.Get(HeaderCache))
+	require.Equal(t, "*", headers.Get(HeaderCORS))
+
+	// We expect the last block before the Taproot blocks to not have any
+	// Taproot tweaks.
+	noTrHeight := expectedHeight - numTrBlocks
+	noTrBlock, err := spTweakData.TweakAtHeight(int32(noTrHeight))
+	require.NoError(t, err)
+	require.Empty(t, noTrBlock)
+
+	// Check the actual tweaks in the last 20 blocks.
+	loopStart := expectedHeight - numTrBlocks + 1
+	for height := loopStart; height <= expectedHeight; height++ {
+		trBlock, err := spTweakData.TweakAtHeight(int32(height))
+		require.NoError(t, err)
+
+		require.Len(t, trBlock, 2)
+		require.Lenf(
+			t, trBlock[1],
+			hex.EncodedLen(btcec.PubKeyBytesLenCompressed),
+			"block %d, index 1", height,
+		)
+		require.Lenf(
+			t, trBlock[2],
+			hex.EncodedLen(btcec.PubKeyBytesLenCompressed),
+			"block %d, index 2", height,
+		)
+
+		block := ctx.blockAtHeight(t, int32(height))
+		require.Len(t, block.Transactions, 3)
+
+		key1, err := sp.TransactionTweakData(
+			block.Transactions[1], ctx.fetchPrevOutScript, log,
+		)
+		require.NoError(t, err)
+		require.Equal(
+			t, trBlock[1],
+			hex.EncodeToString(key1.SerializeCompressed()),
+		)
+
+		key2, err := sp.TransactionTweakData(
+			block.Transactions[2], ctx.fetchPrevOutScript, log,
+		)
+		require.NoError(t, err)
+		require.Equal(
+			t, trBlock[2],
+			hex.EncodeToString(key2.SerializeCompressed()),
+		)
+	}
+
+	// We mine an empty block to ensure that the following tests can assume
+	// empty blocks again.
+	ctx.miner.MineEmptyBlocks(1)
+	ctx.waitBackendSync(t)
+	ctx.waitFilesSync(t)
 }
 
 func testTxOutProof(t *testing.T, ctx *testContext) {
@@ -583,110 +783,39 @@ func testTxRaw(t *testing.T, ctx *testContext) {
 }
 
 func TestBlockDN(t *testing.T) {
-	ctx := context.Background()
-	testDir := ".unit-test-logs"
+	// Activate Taproot for regtest.
+	TaprootActivationHeights[chaincfg.RegressionNetParams.Net] = 1
 
-	_ = os.RemoveAll(testDir)
-	_ = os.MkdirAll(testDir, 0700)
-
-	miner := lntestminer.NewTempMiner(
-		ctx, t, filepath.Join(testDir, "temp-miner"), "miner.log",
-	)
-	require.NoError(t, miner.SetUp(true, 100))
-
-	t.Cleanup(miner.Stop)
-
-	backend, backendCfg, cleanup := newBitcoind(
-		t, testDir, []string{
-			"-regtest",
-			"-txindex",
-			"-disablewallet",
-			"-peerblockfilters=1",
-			"-blockfilterindex=1",
-			"-dbcache=512",
-		},
-	)
-
-	t.Cleanup(func() {
-		require.NoError(t, cleanup())
-	})
-
-	err := wait.NoError(func() error {
-		return backend.AddNode(miner.P2PAddress(), rpcclient.ANAdd)
-	}, testTimeout)
-	require.NoError(t, err)
+	miner, backend, backendCfg, _ := setupBackend(t, unitTestDir)
 
 	dataDir := t.TempDir()
 	listenAddr := fmt.Sprintf("127.0.0.1:%d", port.NextAvailablePort())
 
-	setupLogging(testDir)
 	testServer := newServer(
-		false, dataDir, listenAddr, &backendCfg, unittest.NetParams, 6,
-		DefaultRegtestHeadersPerFile, DefaultRegtestFiltersPerFile,
+		false, true, dataDir, listenAddr, &backendCfg,
+		unittest.NetParams, 6, DefaultRegtestHeadersPerFile,
+		DefaultRegtestFiltersPerFile, DefaultRegtestSPTweaksPerFile,
 	)
+	ctx := &testContext{
+		miner:   miner,
+		backend: backend,
+		server:  testServer,
+	}
 
 	// Mine a couple blocks and wait for the backend to catch up.
 	t.Logf("Mining %d blocks...", numInitialBlocks)
 	_ = miner.MineEmptyBlocks(numInitialBlocks)
 
 	// Wait until the backend is fully synced to the miner.
-	t.Log("Waiting for bitcoind backend to sync to miner...")
-	syncState := int32(0)
-	err = wait.NoError(func() error {
-		backendCount, err := backend.GetBlockCount()
-		if err != nil {
-			return fmt.Errorf("unable to get backend height: %w",
-				err)
-		}
-
-		backendHeight := int32(backendCount)
-
-		_, minerHeight, err := miner.Client.GetBestBlock()
-		if err != nil {
-			return fmt.Errorf("unable to get miner height: %w", err)
-		}
-
-		if backendHeight > syncState+1000 {
-			t.Logf("Backend height: %d, Miner height: %d",
-				backendHeight, minerHeight)
-			syncState = backendHeight
-		}
-
-		if minerHeight != backendHeight {
-			return fmt.Errorf("expected height %d, got %d",
-				minerHeight, backendHeight)
-		}
-
-		return nil
-	}, syncTimeout)
-	require.NoError(t, err)
+	ctx.waitBackendSync(t)
 
 	t.Logf("Starting block-dn server at %s...", listenAddr)
-
 	require.NoError(t, testServer.start())
-	err = wait.NoError(func() error {
-		height := testServer.currentHeight.Load()
-		_, minerHeight, err := miner.Client.GetBestBlock()
-		if err != nil {
-			return fmt.Errorf("unable to get miner height: %w", err)
-		}
-
-		if minerHeight != height {
-			return fmt.Errorf("expected height %d, got %d",
-				minerHeight, height)
-		}
-
-		return nil
-	}, syncTimeout)
-	require.NoError(t, err)
+	ctx.waitFilesSync(t)
 
 	for _, testCase := range testCases {
 		success := t.Run(testCase.name, func(t *testing.T) {
-			testCase.fn(t, &testContext{
-				miner:   miner,
-				backend: backend,
-				server:  testServer,
-			})
+			testCase.fn(t, ctx)
 		})
 		if !success {
 			t.Fatalf("test case %s failed", testCase.name)
@@ -696,7 +825,7 @@ func TestBlockDN(t *testing.T) {
 
 func newBitcoind(t *testing.T, logdir string,
 	extraArgs []string) (*rpcclient.Client, rpcclient.ConnConfig,
-	func() error) {
+	*chain.BitcoindConfig, func() error) {
 
 	tempBitcoindDir := t.TempDir()
 
@@ -759,11 +888,107 @@ func newBitcoind(t *testing.T, logdir string,
 		HTTPPostMode:         true,
 	}
 
+	bitcoindCfg := &chain.BitcoindConfig{
+		ChainParams: &testParams,
+		Host:        rpcHost,
+		User:        rpcUser,
+		Pass:        rpcPass,
+		ZMQConfig: &chain.ZMQConfig{
+			ZMQBlockHost:           zmqBlockAddr,
+			ZMQTxHost:              zmqTxAddr,
+			MempoolPollingInterval: pollInterval,
+			RPCBatchInterval:       pollInterval,
+			RPCBatchSize:           1,
+			ZMQReadDeadline:        defaultTimeout,
+		},
+	}
+
 	client, err := rpcclient.New(&rpcCfg, nil)
 	if err != nil {
 		_ = cleanUp()
 		require.NoError(t, err)
 	}
 
-	return client, rpcCfg, cleanUp
+	return client, rpcCfg, bitcoindCfg, cleanUp
+}
+
+// nolint:unparam
+func setupBackend(t *testing.T, testDir string) (*lntestminer.HarnessMiner,
+	*rpcclient.Client, rpcclient.ConnConfig, *chain.BitcoindConfig) {
+
+	ctx := context.Background()
+	setupLogging(testDir, "debug")
+
+	_ = os.RemoveAll(testDir)
+	_ = os.MkdirAll(testDir, 0700)
+
+	miner := lntestminer.NewTempMiner(
+		ctx, t, filepath.Join(testDir, "temp-miner"), "miner.log",
+	)
+	require.NoError(t, miner.SetUp(true, numStartupBlocks))
+
+	// Next mine enough blocks in order for segwit and the CSV package
+	// soft-fork to activate on SimNet.
+	numBlocks := testParams.MinerConfirmationWindow * 2
+	miner.GenerateBlocks(numBlocks)
+
+	t.Cleanup(miner.Stop)
+
+	backend, backendCfg, bitcoindCfg, cleanup := newBitcoind(
+		t, testDir, []string{
+			"-regtest",
+			"-txindex",
+			"-disablewallet",
+			"-peerblockfilters=1",
+			"-blockfilterindex=1",
+		},
+	)
+
+	t.Cleanup(func() {
+		require.NoError(t, cleanup())
+	})
+
+	err := wait.NoError(func() error {
+		return backend.AddNode(miner.P2PAddress(), rpcclient.ANAdd)
+	}, testTimeout)
+	require.NoError(t, err)
+
+	return miner, backend, backendCfg, bitcoindCfg
+}
+
+func waitBackendSync(t *testing.T, backend *rpcclient.Client,
+	miner *lntestminer.HarnessMiner) {
+
+	t.Log("Waiting for bitcoind backend to sync to miner...")
+	syncState := int32(0)
+	err := wait.NoError(func() error {
+		backendCount, err := backend.GetBlockCount()
+		if err != nil {
+			return fmt.Errorf("unable to get backend height: %w",
+				err)
+		}
+
+		backendHeight := int32(backendCount)
+
+		_, minerHeight, err := miner.Client.GetBestBlock()
+		if err != nil {
+			return fmt.Errorf("unable to get miner height: %w", err)
+		}
+
+		if backendHeight > syncState+1000 {
+			t.Logf("Backend height: %d, Miner height: %d",
+				backendHeight, minerHeight)
+			syncState = backendHeight
+		}
+
+		if minerHeight != backendHeight {
+			return fmt.Errorf("expected height %d, got %d",
+				minerHeight, backendHeight)
+		}
+
+		t.Logf("Synced backend to miner at height %d", backendHeight)
+
+		return nil
+	}, syncTimeout)
+	require.NoError(t, err)
 }

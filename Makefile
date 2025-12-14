@@ -32,7 +32,7 @@ ifneq ($(sys),)
 BUILD_SYSTEM = $(sys)
 endif
 
-TEST_TAGS := bitcoind
+TEST_TAGS := bitcoind integration dev
 TEST_FLAGS = -test.timeout=20m -tags="$(TEST_TAGS)"
 
 UNIT := $(GOLIST) | $(XARGS) env $(GOTEST) $(TEST_FLAGS)

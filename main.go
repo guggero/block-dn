@@ -36,10 +36,12 @@ type mainCommand struct {
 	regtest  bool
 	signet   bool
 
-	lightMode bool
+	lightMode        bool
+	indexSPTweakData bool
 
 	baseDir   string
 	logDir    string
+	logLevel  string
 	indexPage string
 
 	listenAddr string
@@ -75,6 +77,7 @@ func main() {
 			chainParams := &chaincfg.MainNetParams
 			headersPerFile := int32(DefaultHeadersPerFile)
 			filtersPerFile := int32(DefaultFiltersPerFile)
+			spTweaksPerFile := int32(DefaultSPTweaksPerFile)
 
 			switch {
 			case cc.testnet:
@@ -109,9 +112,10 @@ func main() {
 
 				headersPerFile = DefaultRegtestHeadersPerFile
 				filtersPerFile = DefaultRegtestFiltersPerFile
+				spTweaksPerFile = DefaultRegtestSPTweaksPerFile
 			}
 
-			setupLogging(cc.logDir)
+			setupLogging(cc.logDir, cc.logLevel)
 			log.Infof("block-dn version v%s commit %s", version,
 				Commit)
 
@@ -134,10 +138,10 @@ func main() {
 			}
 
 			server := newServer(
-				cc.lightMode, cc.baseDir, cc.listenAddr,
-				cc.bitcoindConfig, chainParams,
+				cc.lightMode, cc.indexSPTweakData, cc.baseDir,
+				cc.listenAddr, cc.bitcoindConfig, chainParams,
 				cc.reOrgSafeDepth, headersPerFile,
-				filtersPerFile,
+				filtersPerFile, spTweaksPerFile,
 			)
 			err := server.start()
 			if err != nil {
@@ -190,6 +194,14 @@ func main() {
 			"space; but only the status and block endpoints are "+
 			"available in this mode",
 	)
+	cc.cmd.PersistentFlags().BoolVar(
+		&cc.indexSPTweakData, "index-sp-tweak-data", false,
+		"Indicates if the server should index BIP-0352 Silent "+
+			"Payments tweak data that allows light clients to "+
+			"scan the chain for inbound SP more efficiently; "+
+			"this requires every block since the activation of "+
+			"Taproot to be indexed which may take a while",
+	)
 	cc.cmd.PersistentFlags().StringVar(
 		&cc.baseDir, "base-dir", "", "The base directory "+
 			"where the generated files will be stored",
@@ -197,6 +209,10 @@ func main() {
 	cc.cmd.PersistentFlags().StringVar(
 		&cc.logDir, "log-dir", workDir, "The log directory where the "+
 			"log file will be written",
+	)
+	cc.cmd.PersistentFlags().StringVar(
+		&cc.logLevel, "log-level", "info", "The log level for the "+
+			"logger: debug, info, warn, error, critical",
 	)
 	cc.cmd.PersistentFlags().StringVar(
 		&cc.indexPage, "index-page", "", "Full path to the index.html "+
@@ -233,7 +249,7 @@ func main() {
 	}
 }
 
-func setupLogging(logDir string) {
+func setupLogging(logDir, logLevel string) {
 	logConfig := build.DefaultLogConfig()
 	logWriter := build.NewRotatingLogWriter()
 	logMgr = build.NewSubLoggerManager(build.NewDefaultLogHandlers(
@@ -248,7 +264,7 @@ func setupLogging(logDir string) {
 	if err != nil {
 		panic(err)
 	}
-	err = build.ParseAndSetDebugLevels("debug", logMgr)
+	err = build.ParseAndSetDebugLevels(logLevel, logMgr)
 	if err != nil {
 		panic(err)
 	}

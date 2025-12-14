@@ -1,31 +1,92 @@
 package main
 
 import (
-	"encoding/hex"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
 	"testing"
 
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/stretchr/testify/require"
 )
 
-func TestFilterHeaderConstruction(t *testing.T) {
-	// Filter header from mainnet block 499.
-	prevHeader, _ := chainhash.NewHashFromStr(
-		"bec9900067347f68be6c6c38b2b86c026c7a2535c221cf3af0388860234c" +
-			"c98b",
+const (
+	filtersPerFile        = 100
+	emptyFilterSize int64 = 5
+
+	emptyFilterFileSize int64 = headersPerFile * emptyFilterSize
+)
+
+func TestCFilterFilesUpdate(t *testing.T) {
+	testDir := ".unit-test-logs"
+	miner, backend, _, _ := setupBackend(t, testDir)
+
+	// Mine initial blocks. The miner starts with 200 blocks already mined.
+	_ = miner.MineEmptyBlocks(initialBlocks - int(totalStartupBlocks))
+
+	// Wait until the backend is fully synced to the miner.
+	waitBackendSync(t, backend, miner)
+
+	// First run: start from scratch.
+	dataDir := t.TempDir()
+	quit := make(chan struct{})
+	h2hCache := newH2HCache(backend)
+	hf := newCFilterFiles(
+		filtersPerFile, backend, quit, dataDir, &testParams, h2hCache,
 	)
 
-	// Filter bytes from mainnet block 500.
-	filterBytes, _ := hex.DecodeString("017f23b0")
+	var wg sync.WaitGroup
 
-	filterHash := chainhash.DoubleHashB(filterBytes)
-	filterHash = append(filterHash, prevHeader[:]...)
-	filterHeader2 := chainhash.DoubleHashH(filterHash)
+	// Wait for the initial blocks to be written.
+	waitForTargetHeight(t, &wg, hf, initialBlocks)
 
-	// Filter header from mainnet block 500.
-	expectedHeader, _ := chainhash.NewHashFromStr(
-		"0f3bc0ff8fe676832252d8fbd2aefb91b606a27e64ab4acf09971bd882c0" +
-			"f011",
+	// Check files.
+	filterDir := filepath.Join(dataDir, FilterFileDir)
+	files, err := os.ReadDir(filterDir)
+	require.NoError(t, err)
+	require.Len(t, files, 4)
+
+	// Check file names and sizes.
+	checkFilterFiles(t, filterDir, 0, 99)
+	checkFilterFiles(t, filterDir, 100, 199)
+	checkFilterFiles(t, filterDir, 200, 299)
+	checkFilterFiles(t, filterDir, 300, 399)
+
+	// Stop the service.
+	close(quit)
+	wg.Wait()
+
+	// Second run: restart and continue.
+	const finalBlocks = 550
+	_ = miner.MineEmptyBlocks(finalBlocks - initialBlocks)
+
+	// Wait until the backend is fully synced to the miner.
+	waitBackendSync(t, backend, miner)
+
+	quit = make(chan struct{})
+	hf = newCFilterFiles(
+		filtersPerFile, backend, quit, dataDir, &testParams, h2hCache,
 	)
-	require.Equal(t, expectedHeader[:], filterHeader2[:])
+
+	// Wait for the final blocks to be written.
+	waitForTargetHeight(t, &wg, hf, finalBlocks)
+
+	// Check files again.
+	files, err = os.ReadDir(filterDir)
+	require.NoError(t, err)
+	require.Len(t, files, 5)
+
+	// Check new file names and sizes.
+	checkFilterFiles(t, filterDir, 400, 499)
+
+	// Stop the service.
+	close(quit)
+	wg.Wait()
+}
+
+func checkFilterFiles(t *testing.T, filterDir string, start, end int32) {
+	checkFile(
+		t, fmt.Sprintf(FilterFileNamePattern, filterDir, start, end),
+		emptyFilterFileSize,
+	)
 }
