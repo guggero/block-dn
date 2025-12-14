@@ -114,6 +114,10 @@ func (s *server) createRouter() *mux.Router {
 		s.filterHeadersImportRequestHandler,
 	)
 	router.HandleFunc("/filters/{height:[0-9]+}", s.filtersRequestHandler)
+	router.HandleFunc(
+		"/sp/tweak-data/{height:[0-9]+}",
+		s.spTweakDataRequestHandler,
+	)
 	router.HandleFunc("/block/{hash:[0-9a-f]+}", s.blockRequestHandler)
 	router.HandleFunc(
 		"/tx/out-proof/{txid:[0-9a-f]+}", s.txOutProofRequestHandler,
@@ -150,14 +154,20 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	status := &Status{
-		ChainGenesisHash: s.chainParams.GenesisHash.String(),
-		ChainName:        s.chainParams.Name,
-		BestBlockHeight:  bestHeight,
-		BestBlockHash:    bestBlock.String(),
-		BestFilterHeader: bestFilter.String(),
-		EntriesPerHeader: s.headersPerFile,
-		EntriesPerFilter: s.filtersPerFile,
+		ChainGenesisHash:      s.chainParams.GenesisHash.String(),
+		ChainName:             s.chainParams.Name,
+		BestBlockHeight:       bestHeight,
+		BestBlockHash:         bestBlock.String(),
+		BestFilterHeight:      s.cFilterFiles.currentHeight.Load(),
+		BestFilterHeader:      bestFilter.String(),
+		BestSPTweakHeight:     s.spTweakFiles.currentHeight.Load(),
+		EntriesPerHeaderFile:  s.headersPerFile,
+		EntriesPerFilterFile:  s.filtersPerFile,
+		EntriesPerSPTweakFile: s.spTweaksPerFile,
 	}
+
+	status.AllFilesSynced = bestHeight == status.BestFilterHeight &&
+		bestHeight == status.BestSPTweakHeight
 
 	sendJSON(w, status, maxAgeMemory)
 }
@@ -204,6 +214,16 @@ func (s *server) filtersRequestHandler(w http.ResponseWriter, r *http.Request) {
 		w, r, FilterFileDir, FilterFileNamePattern,
 		int64(s.filtersPerFile), s.cFilterFiles.serializeFilters,
 		s.cFilterFiles,
+	)
+}
+
+func (s *server) spTweakDataRequestHandler(w http.ResponseWriter,
+	r *http.Request) {
+
+	s.heightBasedRequestHandler(
+		w, r, SPTweakFileDir, SPTweakFileNamePattern,
+		int64(s.spTweaksPerFile), s.spTweakFiles.serializeSPTweakData,
+		s.spTweakFiles,
 	)
 }
 

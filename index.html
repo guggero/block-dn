@@ -80,6 +80,9 @@
         <li>Blocks</li>
         <li>Compact Filter headers</li>
         <li>Compact Filters</li>
+        <li>Raw Transactions</li>
+        <li>Block Transaction Inclusion Proofs (TxOutProofs)</li>
+        <li>Silent Payments Block Tweak Data</li>
     </ul>
     <p>
         There are two ways to use <code>block-dn</code>:
@@ -151,7 +154,7 @@
                     The file starts with the 10 byte metadata header (4 bytes
                     Bitcoin network identifier, 1 byte import format version,
                     1 byte header type, 4 byte start header height), followed by
-                    the headers serialized as 80 bytes per header.<br/>
+                    the headers serialized as 80 bytes per header.<br />
                     <code>end_block</code> must be divisible by 100'000 and is
                     non-inclusive, meaning all blocks up to but not including
                     the <code>end_block</code> are returned!
@@ -184,7 +187,7 @@
                     (4 bytes Bitcoin network identifier, 1 byte import format
                     version, 1 byte header type, 4 byte start header height),
                     followed by the filter header hashes serialized as 32 bytes
-                    per header hash.<br/>
+                    per header hash.<br />
                     <code>end_block</code> must be divisible by 100'000 and is
                     non-inclusive, meaning all blocks up to but not including
                     the <code>end_block</code> are returned!
@@ -207,6 +210,34 @@
                 <td>
                     <a href="https://block-dn.org/filters/802000">
                         block-dn.org/filters/802000
+                    </a>
+                </td>
+            </tr>
+            <tr>
+                <td><code>/sp/tweak-data/&lt;start_block&gt;</code></td>
+                <td>
+                    Returns a JSON file containing Silent Payment tweak data
+                    entries for transactions of 2'000 blocks, using the
+                    following format:<br />
+                    <pre>
+    {
+      "start_height": &lt;start_block&gt;,
+      "num_blocks": 2000,
+      "blocks": [
+        {
+          "&lt;tx_index 1&gt;": "02a1633f5b1c4e8...",
+          "&lt;tx_index x&gt;": "03cdefa84923dc8..."
+        },
+        {
+          ...
+        }
+      ]
+    }
+                    </pre>
+                </td>
+                <td>
+                    <a href="https://block-dn.org/sp/tweak-data/802000">
+                        block-dn.org/sp/tweak-data/802000
                     </a>
                 </td>
             </tr>

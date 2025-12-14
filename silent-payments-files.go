@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -406,6 +407,12 @@ func (s *spTweakFiles) writeSPTweaks(fileName string, startIndex,
 		}
 	}()
 
+	return s.serializeSPTweakData(file, startIndex, endIndex)
+}
+
+func (s *spTweakFiles) serializeSPTweakData(w io.Writer, startIndex,
+	endIndex int32) error {
+
 	// We need to add plus one here since the end index is inclusive in the
 	// for loop below (j <= endIndex).
 	numBlocks := endIndex - startIndex + 1
@@ -445,10 +452,9 @@ func (s *spTweakFiles) writeSPTweaks(fileName string, startIndex,
 		spTweakFile.Blocks = append(spTweakFile.Blocks, block)
 	}
 
-	err = json.NewEncoder(file).Encode(spTweakFile)
+	err := json.NewEncoder(w).Encode(spTweakFile)
 	if err != nil {
-		return fmt.Errorf("error writing SP tweak data to file %s: %w",
-			fileName, err)
+		return fmt.Errorf("error writing SP tweak data: %w", err)
 	}
 
 	return nil

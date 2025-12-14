@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,9 +15,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil/psbt"
+	sp "github.com/btcsuite/btcd/btcutil/silentpayments"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/rpcclient"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/chain"
 	lntestminer "github.com/lightningnetwork/lnd/lntest/miner"
 	"github.com/lightningnetwork/lnd/lntest/port"
@@ -120,6 +125,68 @@ func (ctx *testContext) bestBlock(t *testing.T) (int32, chainhash.Hash) {
 	return int32(height), *blockHash
 }
 
+func (ctx *testContext) blockAtHeight(t *testing.T,
+	height int32) *wire.MsgBlock {
+
+	hash, err := ctx.backend.GetBlockHash(int64(height))
+	require.NoError(t, err)
+
+	block, err := ctx.backend.GetBlock(hash)
+	require.NoError(t, err)
+
+	return block
+}
+
+func (ctx *testContext) fetchPrevOutScript(op wire.OutPoint) ([]byte, error) {
+	tx, err := ctx.backend.GetRawTransaction(&op.Hash)
+	if err != nil {
+		return nil, fmt.Errorf("error fetching previous "+
+			"transaction: %w", err)
+	}
+
+	if int(op.Index) >= len(tx.MsgTx().TxOut) {
+		return nil, fmt.Errorf("output index %d out of range for "+
+			"transaction %s", op.Index, op.Hash.String())
+	}
+
+	return tx.MsgTx().TxOut[op.Index].PkScript, nil
+}
+
+func (ctx *testContext) waitBackendSync(t *testing.T) {
+	waitBackendSync(t, ctx.backend, ctx.miner)
+}
+
+func (ctx *testContext) waitFilesSync(t *testing.T) {
+	err := wait.NoError(func() error {
+		headerHeight := ctx.server.headerFiles.getCurrentHeight()
+		_, minerHeight, err := ctx.miner.Client.GetBestBlock()
+		if err != nil {
+			return fmt.Errorf("unable to get miner height: %w", err)
+		}
+
+		if minerHeight != headerHeight {
+			return fmt.Errorf("expected height %d, got %d",
+				minerHeight, headerHeight)
+		}
+
+		if headerHeight != ctx.server.cFilterFiles.getCurrentHeight() {
+			return fmt.Errorf("cfilter height mismatch: %d vs %d",
+				ctx.server.cFilterFiles.getCurrentHeight(),
+				headerHeight)
+		}
+
+		if headerHeight != ctx.server.spTweakFiles.getCurrentHeight() {
+			return fmt.Errorf("sp tweak data height mismatch: %d "+
+				"vs %d",
+				ctx.server.spTweakFiles.getCurrentHeight(),
+				headerHeight)
+		}
+
+		return nil
+	}, syncTimeout)
+	require.NoError(t, err)
+}
+
 type testFunc func(t *testing.T, ctx *testContext)
 
 var testCases = []struct {
@@ -153,6 +220,10 @@ var testCases = []struct {
 	{
 		name: "filter-headers-import",
 		fn:   testFilterHeadersImport,
+	},
+	{
+		name: "sp-tweak-data",
+		fn:   testSPTweakData,
 	},
 	{
 		name: "tx-out-proof",
@@ -297,10 +368,13 @@ func testStatus(t *testing.T, ctx *testContext) {
 		t, testParams.GenesisHash.String(), status.ChainGenesisHash,
 	)
 	require.Equal(
-		t, ctx.server.headersPerFile, status.EntriesPerHeader,
+		t, ctx.server.headersPerFile, status.EntriesPerHeaderFile,
 	)
 	require.Equal(
-		t, ctx.server.filtersPerFile, status.EntriesPerFilter,
+		t, ctx.server.filtersPerFile, status.EntriesPerFilterFile,
+	)
+	require.Equal(
+		t, ctx.server.spTweaksPerFile, status.EntriesPerSPTweakFile,
 	)
 
 	require.Contains(t, headers, HeaderCache)
@@ -309,7 +383,12 @@ func testStatus(t *testing.T, ctx *testContext) {
 
 	height, blockHash := ctx.bestBlock(t)
 	require.Equal(t, height, status.BestBlockHeight)
+	require.Equal(t, height, status.BestFilterHeight)
+	require.Equal(t, height, status.BestSPTweakHeight)
 	require.Equal(t, blockHash.String(), status.BestBlockHash)
+
+	filterHeader := ctx.server.headerFiles.filterHeaders[blockHash]
+	require.Equal(t, filterHeader.String(), status.BestFilterHeader)
 }
 
 func testHeaders(t *testing.T, ctx *testContext) {
@@ -523,6 +602,121 @@ func testFilterHeadersImport(t *testing.T, ctx *testContext) {
 	}
 }
 
+func testSPTweakData(t *testing.T, ctx *testContext) {
+	var spTweakData SPTweakFile
+	headers := ctx.fetchJSON(t, "sp/tweak-data/0", &spTweakData)
+	require.Equal(t, int32(0), spTweakData.StartHeight)
+	require.Equal(
+		t, int32(DefaultRegtestSPTweaksPerFile), spTweakData.NumBlocks,
+	)
+	require.Len(t, spTweakData.Blocks, int(spTweakData.NumBlocks))
+
+	require.Contains(t, headers, HeaderCache)
+	require.Equal(t, cacheDisk, headers.Get(HeaderCache))
+	require.Equal(t, "*", headers.Get(HeaderCORS))
+
+	// And now we try to fetch all SP tweak data up to the current height,
+	// which will require some of them to be served from memory.
+	const startHeight = DefaultRegtestSPTweaksPerFile
+	headers = ctx.fetchJSON(
+		t, fmt.Sprintf("sp/tweak-data/%d", startHeight), &spTweakData,
+	)
+	expectedBlocks := totalInitialBlocks - startHeight + 1
+	require.Equal(
+		t, int32(expectedBlocks), spTweakData.NumBlocks,
+	)
+	require.Len(t, spTweakData.Blocks, int(expectedBlocks))
+
+	require.Contains(t, headers, HeaderCache)
+	require.Equal(t, cacheMemory, headers.Get(HeaderCache))
+	require.Equal(t, "*", headers.Get(HeaderCORS))
+
+	// Now we mine some blocks with Taproot outputs to ensure we have
+	// Taproot tweaks in the SP tweak data.
+	numTrBlocks := uint32(20)
+	for range numTrBlocks {
+		ctx.miner.SendOutput(&wire.TxOut{
+			Value:    5_000,
+			PkScript: psbt.SilentPaymentDummyP2TROutput,
+		}, 2)
+		ctx.miner.SendOutput(&wire.TxOut{
+			Value:    5_000,
+			PkScript: psbt.SilentPaymentDummyP2TROutput,
+		}, 2)
+		ctx.miner.MineBlocksAndAssertNumTxes(1, 2)
+	}
+
+	ctx.waitBackendSync(t)
+	ctx.waitFilesSync(t)
+
+	headers = ctx.fetchJSON(
+		t, fmt.Sprintf("sp/tweak-data/%d", startHeight), &spTweakData,
+	)
+	expectedHeight := totalInitialBlocks + numTrBlocks
+	expectedBlocks = expectedHeight - DefaultRegtestSPTweaksPerFile + 1
+	require.Equal(
+		t, int32(expectedBlocks), spTweakData.NumBlocks,
+	)
+	require.Len(t, spTweakData.Blocks, int(expectedBlocks))
+
+	require.Contains(t, headers, HeaderCache)
+	require.Equal(t, cacheMemory, headers.Get(HeaderCache))
+	require.Equal(t, "*", headers.Get(HeaderCORS))
+
+	// We expect the last block before the Taproot blocks to not have any
+	// Taproot tweaks.
+	noTrHeight := expectedHeight - numTrBlocks
+	noTrBlock, err := spTweakData.TweakAtHeight(int32(noTrHeight))
+	require.NoError(t, err)
+	require.Empty(t, noTrBlock)
+
+	// Check the actual tweaks in the last 20 blocks.
+	loopStart := expectedHeight - numTrBlocks + 1
+	for height := loopStart; height <= expectedHeight; height++ {
+		trBlock, err := spTweakData.TweakAtHeight(int32(height))
+		require.NoError(t, err)
+
+		require.Len(t, trBlock, 2)
+		require.Lenf(
+			t, trBlock[1],
+			hex.EncodedLen(btcec.PubKeyBytesLenCompressed),
+			"block %d, index 1", height,
+		)
+		require.Lenf(
+			t, trBlock[2],
+			hex.EncodedLen(btcec.PubKeyBytesLenCompressed),
+			"block %d, index 2", height,
+		)
+
+		block := ctx.blockAtHeight(t, int32(height))
+		require.Len(t, block.Transactions, 3)
+
+		key1, err := sp.TransactionTweakData(
+			block.Transactions[1], ctx.fetchPrevOutScript, log,
+		)
+		require.NoError(t, err)
+		require.Equal(
+			t, trBlock[1],
+			hex.EncodeToString(key1.SerializeCompressed()),
+		)
+
+		key2, err := sp.TransactionTweakData(
+			block.Transactions[2], ctx.fetchPrevOutScript, log,
+		)
+		require.NoError(t, err)
+		require.Equal(
+			t, trBlock[2],
+			hex.EncodeToString(key2.SerializeCompressed()),
+		)
+	}
+
+	// We mine an empty block to ensure that the following tests can assume
+	// empty blocks again.
+	ctx.miner.MineEmptyBlocks(1)
+	ctx.waitBackendSync(t)
+	ctx.waitFilesSync(t)
+}
+
 func testTxOutProof(t *testing.T, ctx *testContext) {
 	// We start with the latest block.
 	bestHeight, bestHash := ctx.bestBlock(t)
@@ -587,6 +781,9 @@ func testTxRaw(t *testing.T, ctx *testContext) {
 }
 
 func TestBlockDN(t *testing.T) {
+	// Activate Taproot for regtest.
+	TaprootActivationHeights[chaincfg.RegressionNetParams.Net] = 1
+
 	testDir := ".unit-test-logs"
 	miner, backend, backendCfg, _ := setupBackend(t, testDir)
 
@@ -594,50 +791,30 @@ func TestBlockDN(t *testing.T) {
 	listenAddr := fmt.Sprintf("127.0.0.1:%d", port.NextAvailablePort())
 
 	testServer := newServer(
-		false, false, dataDir, listenAddr, &backendCfg,
+		false, true, dataDir, listenAddr, &backendCfg,
 		unittest.NetParams, 6, DefaultRegtestHeadersPerFile,
 		DefaultRegtestFiltersPerFile, DefaultRegtestSPTweaksPerFile,
 	)
+	ctx := &testContext{
+		miner:   miner,
+		backend: backend,
+		server:  testServer,
+	}
 
 	// Mine a couple blocks and wait for the backend to catch up.
 	t.Logf("Mining %d blocks...", numInitialBlocks)
 	_ = miner.MineEmptyBlocks(numInitialBlocks)
 
 	// Wait until the backend is fully synced to the miner.
-	waitBackendSync(t, backend, miner)
+	ctx.waitBackendSync(t)
 
 	t.Logf("Starting block-dn server at %s...", listenAddr)
-
 	require.NoError(t, testServer.start())
-	err := wait.NoError(func() error {
-		headerHeight := testServer.headerFiles.getCurrentHeight()
-		_, minerHeight, err := miner.Client.GetBestBlock()
-		if err != nil {
-			return fmt.Errorf("unable to get miner height: %w", err)
-		}
-
-		if minerHeight != headerHeight {
-			return fmt.Errorf("expected height %d, got %d",
-				minerHeight, headerHeight)
-		}
-
-		if headerHeight != testServer.cFilterFiles.getCurrentHeight() {
-			return fmt.Errorf("cfilter height mismatch: %d vs %d",
-				testServer.cFilterFiles.getCurrentHeight(),
-				headerHeight)
-		}
-
-		return nil
-	}, syncTimeout)
-	require.NoError(t, err)
+	ctx.waitFilesSync(t)
 
 	for _, testCase := range testCases {
 		success := t.Run(testCase.name, func(t *testing.T) {
-			testCase.fn(t, &testContext{
-				miner:   miner,
-				backend: backend,
-				server:  testServer,
-			})
+			testCase.fn(t, ctx)
 		})
 		if !success {
 			t.Fatalf("test case %s failed", testCase.name)
