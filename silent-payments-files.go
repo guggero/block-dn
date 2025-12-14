@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcec/v2"
 	sp "github.com/btcsuite/btcd/btcutil/silentpayments"
 	"github.com/btcsuite/btcd/chaincfg"
@@ -59,6 +60,8 @@ type prevOutCache struct {
 	numTrHit   int32
 	numTxFetch int32
 
+	enabled bool
+
 	lastReset time.Time
 
 	chain *rpcclient.Client
@@ -68,6 +71,7 @@ type prevOutCache struct {
 
 func newPrevOutCache(chain *rpcclient.Client) *prevOutCache {
 	return &prevOutCache{
+		enabled:   true,
 		chain:     chain,
 		lastReset: time.Now(),
 		cache:     lnutils.SyncMap[wire.OutPoint, []byte]{},
@@ -93,6 +97,12 @@ func (p *prevOutCache) LogAndReset() {
 	p.lastReset = time.Now()
 }
 
+func (p *prevOutCache) Disable() {
+	p.enabled = false
+	p.cache = lnutils.SyncMap[wire.OutPoint, []byte]{}
+	p.LogAndReset()
+}
+
 // FetchPreviousOutputScript fetches the previous output's pkScript for the
 // given outpoint.
 func (p *prevOutCache) FetchPreviousOutputScript(op wire.OutPoint) ([]byte,
@@ -110,8 +120,8 @@ func (p *prevOutCache) FetchPreviousOutputScript(op wire.OutPoint) ([]byte,
 
 	tx, err := p.chain.GetRawTransaction(&op.Hash)
 	if err != nil {
-		return nil, fmt.Errorf("error fetching previous "+
-			"transaction: %w", err)
+		return nil, fmt.Errorf("error fetching previous transaction: "+
+			"%w", err)
 	}
 
 	p.numTxFetch++
@@ -122,12 +132,18 @@ func (p *prevOutCache) FetchPreviousOutputScript(op wire.OutPoint) ([]byte,
 	}
 
 	pkScript = tx.MsgTx().TxOut[op.Index].PkScript
-	p.cache.Store(op, pkScript)
+	if p.enabled {
+		p.cache.Store(op, pkScript)
+	}
 
 	return pkScript, nil
 }
 
 func (p *prevOutCache) AddOutputs(tx *wire.MsgTx) {
+	if !p.enabled {
+		return
+	}
+
 	txHash := tx.TxHash()
 	for txIndex, txOut := range tx.TxOut {
 		if !txscript.IsPayToTaproot(txOut.PkScript) {
@@ -142,6 +158,10 @@ func (p *prevOutCache) AddOutputs(tx *wire.MsgTx) {
 }
 
 func (p *prevOutCache) RemoveInputs(tx *wire.MsgTx) {
+	if !p.enabled {
+		return
+	}
+
 	for _, txIn := range tx.TxIn {
 		p.cache.Delete(txIn.PreviousOutPoint)
 	}
@@ -235,6 +255,9 @@ func (s *spTweakFiles) updateFiles(targetHeight int32) error {
 
 	// Allow serving requests now that we're caught up.
 	s.startupComplete.Store(true)
+
+	// We can disable the UTXO cache now to free up some memory.
+	s.prevOutCache.Disable()
 
 	// Let's now go into the infinite loop of updating the filter files
 	// whenever a new block is mined.
@@ -351,6 +374,12 @@ func (s *spTweakFiles) indexBlockSPTweakData(height int32,
 	block *wire.MsgBlock) error {
 
 	for txIndex, tx := range block.Transactions {
+		// Skip coinbase transactions, they can't contain Silent Payment
+		// outputs.
+		if blockchain.IsCoinBaseTx(tx) {
+			continue
+		}
+
 		s.prevOutCache.AddOutputs(tx)
 		s.prevOutCache.numTx++
 

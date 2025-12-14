@@ -459,10 +459,10 @@ github.com/grpc-ecosystem/grpc-gateway/v2 v2.16.0 h1:YBftPWNWd4WwGqtY2yeZL2ef8rH
 github.com/grpc-ecosystem/grpc-gateway/v2 v2.16.0/go.mod h1:YN5jB8ie0yfIUg6VvR9Kz84aCaG7AsGZnLjhHbUqwPg=
 github.com/guggero/btcd v0.20.1-beta.0.20251202195639-45154ad3fb60 h1:f+ZAbcGrTB11ml8Xx74UZlA9N21lhI6iflB8pjJKPFA=
 github.com/guggero/btcd v0.20.1-beta.0.20251202195639-45154ad3fb60/go.mod h1:qbPE+pEiR9643E1s1xu57awsRhlCIm1ZIi6FfeRA4KE=
-github.com/guggero/btcd/btcutil v0.0.0-20251214133229-1010306c9382 h1:Ov/JOWqfRQtlakKf0/Ug6vu2SJKPabYf6RIKSP1dL3c=
-github.com/guggero/btcd/btcutil v0.0.0-20251214133229-1010306c9382/go.mod h1:XeQW7NW4owsXB4ofcp/4MK+AifaYAtHqKyXxvuab7Vc=
-github.com/guggero/btcd/btcutil/psbt v0.0.0-20251214133229-1010306c9382 h1:jk9orU7+/UKa6vbgLEpUHe56M8wgVVq00poW1DoKNc0=
-github.com/guggero/btcd/btcutil/psbt v0.0.0-20251214133229-1010306c9382/go.mod h1:3MEbt1zbJx+IYUpRVJqOZ2yzBdQoT5aSxV6P1QJ8B5c=
+github.com/guggero/btcd/btcutil v0.0.0-20251214193129-415da0a46ecb h1:N56EWu+WKhvSGVOAKU1OoQF0BTZTpHtMyVOQxjRYYng=
+github.com/guggero/btcd/btcutil v0.0.0-20251214193129-415da0a46ecb/go.mod h1:XeQW7NW4owsXB4ofcp/4MK+AifaYAtHqKyXxvuab7Vc=
+github.com/guggero/btcd/btcutil/psbt v0.0.0-20251214193129-415da0a46ecb h1:usgbxkBIGyzTAB6uT3cGPn4WKnNIfEb1KpxS7HDiKE0=
+github.com/guggero/btcd/btcutil/psbt v0.0.0-20251214193129-415da0a46ecb/go.mod h1:3MEbt1zbJx+IYUpRVJqOZ2yzBdQoT5aSxV6P1QJ8B5c=
 github.com/guggero/lnd v0.11.0-beta.rc4.0.20251212135228-c2b293e689a9 h1:s/++rmzMi8ed2xwQqEXdzgJOaJSWD6nvQMPvGeUErso=
 github.com/guggero/lnd v0.11.0-beta.rc4.0.20251212135228-c2b293e689a9/go.mod h1:VmPO+7nA2CVsP8+iwYNbltfnSW3WmxY1WozWJ3bBCc8=
 github.com/guggero/lnd/sqldb v0.0.0-20251212135228-c2b293e689a9 h1:tkDFDnaTZKtiGtggADl7DDSu286U7NOJwILrGnr4Gcw=

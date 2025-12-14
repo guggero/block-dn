@@ -387,9 +387,9 @@ tool (
 replace github.com/btcsuite/btcd => github.com/guggero/btcd v0.20.1-beta.0.20251202195639-45154ad3fb60
 
 // Needed for the Silent Payments library.
-replace github.com/btcsuite/btcd/btcutil => github.com/guggero/btcd/btcutil v0.0.0-20251214133229-1010306c9382
+replace github.com/btcsuite/btcd/btcutil => github.com/guggero/btcd/btcutil v0.0.0-20251214193129-415da0a46ecb
 
-replace github.com/btcsuite/btcd/btcutil/psbt => github.com/guggero/btcd/btcutil/psbt v0.0.0-20251214133229-1010306c9382
+replace github.com/btcsuite/btcd/btcutil/psbt => github.com/guggero/btcd/btcutil/psbt v0.0.0-20251214193129-415da0a46ecb
 
 // Needed for the Silent Payments PSBT wallet support.
 replace github.com/lightningnetwork/lnd => github.com/guggero/lnd v0.11.0-beta.rc4.0.20251212135228-c2b293e689a9
