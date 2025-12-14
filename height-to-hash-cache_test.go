@@ -31,7 +31,7 @@ func TestHeightToHashCache(t *testing.T) {
 		require.NoError(t, cleanup())
 	})
 
-	setupLogging(".unit-test-logs", "debug")
+	setupLogging(unitTestDir, "debug")
 	c := newH2HCache(backend)
 
 	bestHeight, err := c.loadFromHeaders("testdata")

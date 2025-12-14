@@ -36,6 +36,8 @@ linters:
     - noinlineerr
     - revive
     - thelper
+    - dupl
+    - nolintlint
 
   settings:
     govet:

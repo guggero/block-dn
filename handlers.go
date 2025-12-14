@@ -166,6 +166,7 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 		EntriesPerSPTweakFile: s.spTweaksPerFile,
 	}
 
+	// nolint:gocritic
 	status.AllFilesSynced = bestHeight == status.BestFilterHeight &&
 		bestHeight == status.BestSPTweakHeight
 

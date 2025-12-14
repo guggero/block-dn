@@ -20,8 +20,7 @@ const (
 )
 
 func TestHeaderFilesUpdate(t *testing.T) {
-	testDir := ".unit-test-logs"
-	miner, backend, _, _ := setupBackend(t, testDir)
+	miner, backend, _, _ := setupBackend(t, unitTestDir)
 
 	// Mine initial blocks. The miner starts with 438 blocks already mined.
 	_ = miner.MineEmptyBlocks(initialBlocks - int(totalStartupBlocks))
@@ -100,6 +99,8 @@ func waitForTargetHeight(t *testing.T, wg *sync.WaitGroup, hf fileWriter,
 	go func() {
 		defer wg.Done()
 		err := hf.updateFiles(targetHeight)
+
+		// nolint:testifylint
 		require.ErrorIs(t, err, errServerShutdown)
 	}()
 

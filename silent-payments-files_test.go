@@ -72,8 +72,7 @@ func TestSPTweakDataFilesUpdate(t *testing.T) {
 	// Activate Taproot for regtest.
 	TaprootActivationHeights[chaincfg.RegressionNetParams.Net] = 1
 
-	testDir := ".unit-test-logs"
-	miner, backend, _, _ := setupBackend(t, testDir)
+	miner, backend, _, _ := setupBackend(t, unitTestDir)
 
 	// Mine initial blocks. The miner starts with 200 blocks already mined.
 	_ = miner.MineEmptyBlocks(initialBlocks - int(totalStartupBlocks))
@@ -153,8 +152,7 @@ func TestSilentPaymentsDetection(t *testing.T) {
 	// Activate Taproot for regtest.
 	TaprootActivationHeights[chaincfg.RegressionNetParams.Net] = 1
 
-	testDir := ".unit-test-logs"
-	miner, backend, _, bitcoindCfg := setupBackend(t, testDir)
+	miner, backend, _, bitcoindCfg := setupBackend(t, unitTestDir)
 	wallet, scopeMgr := newTestWallet(
 		t, &testParams, bitcoindCfg, seedBytes,
 	)

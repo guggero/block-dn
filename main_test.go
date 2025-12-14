@@ -47,6 +47,8 @@ const (
 	cacheTemporary = "max-age=1"
 	cacheMemory    = "max-age=60"
 	cacheDisk      = "max-age=31536000"
+
+	unitTestDir = ".unit-test-logs"
 )
 
 var (
@@ -784,8 +786,7 @@ func TestBlockDN(t *testing.T) {
 	// Activate Taproot for regtest.
 	TaprootActivationHeights[chaincfg.RegressionNetParams.Net] = 1
 
-	testDir := ".unit-test-logs"
-	miner, backend, backendCfg, _ := setupBackend(t, testDir)
+	miner, backend, backendCfg, _ := setupBackend(t, unitTestDir)
 
 	dataDir := t.TempDir()
 	listenAddr := fmt.Sprintf("127.0.0.1:%d", port.NextAvailablePort())
@@ -911,6 +912,7 @@ func newBitcoind(t *testing.T, logdir string,
 	return client, rpcCfg, bitcoindCfg, cleanUp
 }
 
+// nolint:unparam
 func setupBackend(t *testing.T, testDir string) (*lntestminer.HarnessMiner,
 	*rpcclient.Client, rpcclient.ConnConfig, *chain.BitcoindConfig) {
 
