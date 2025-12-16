@@ -40,40 +40,40 @@ var (
 	// contains compact filter headers.
 	typeFilterHeader = byte(1)
 
-	// errUnavailableInLightMode is an error indicating that a certain HTTP
+	// ErrUnavailableInLightMode is an error indicating that a certain HTTP
 	// endpoint isn't available when running in light mode.
-	errUnavailableInLightMode = errors.New(
+	ErrUnavailableInLightMode = errors.New(
 		"endpoint not available in light mode",
 	)
 
-	// errUnavailableSPTweakDataTurnedOff is an error indicating that the SP
+	// ErrUnavailableSPTweakDataTurnedOff is an error indicating that the SP
 	// tweak data indexing is turned off.
-	errUnavailableSPTweakDataTurnedOff = errors.New(
+	ErrUnavailableSPTweakDataTurnedOff = errors.New(
 		"SP tweak data indexing is turned off",
 	)
 
-	// errStillStartingUp is an error indicating that the server is still
+	// ErrStillStartingUp is an error indicating that the server is still
 	// starting up and not ready to serve requests yet.
-	errStillStartingUp = errors.New(
+	ErrStillStartingUp = errors.New(
 		"server still starting up, please try again later",
 	)
 
-	// errInvalidSyncStatus is an error indicating that the sync status is
+	// ErrInvalidSyncStatus is an error indicating that the sync status is
 	// invalid, caused by a bad configuration or unexpected behavior of the
 	// backend.
-	errInvalidSyncStatus = errors.New("invalid sync status")
+	ErrInvalidSyncStatus = errors.New("invalid sync status")
 
-	// errInvalidHashLength is an error indicating that the provided hash
+	// ErrInvalidHashLength is an error indicating that the provided hash
 	// length is invalid.
-	errInvalidHashLength = errors.New("invalid hash length")
+	ErrInvalidHashLength = errors.New("invalid hash length")
 
-	// errInvalidBlockHash is an error indicating that the provided block
+	// ErrInvalidBlockHash is an error indicating that the provided block
 	// hash is invalid.
-	errInvalidBlockHash = errors.New("invalid block hash")
+	ErrInvalidBlockHash = errors.New("invalid block hash")
 
-	// errInvalidTxHash is an error indicating that the provided transaction
+	// ErrInvalidTxHash is an error indicating that the provided transaction
 	// hash is invalid.
-	errInvalidTxHash = errors.New("invalid transaction hash")
+	ErrInvalidTxHash = errors.New("invalid transaction hash")
 
 	//go:embed index.html
 	indexHTML string
@@ -149,13 +149,13 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 	bestHeight := s.headerFiles.getCurrentHeight()
 	bestBlock, err := s.h2hCache.getBlockHash(bestHeight)
 	if err != nil {
-		sendError(w, status500, errInvalidSyncStatus)
+		sendError(w, status500, ErrInvalidSyncStatus)
 		return
 	}
 
 	bestFilter, ok := s.headerFiles.filterHeaders[*bestBlock]
 	if !ok {
-		sendError(w, status500, errInvalidSyncStatus)
+		sendError(w, status500, ErrInvalidSyncStatus)
 		return
 	}
 
@@ -237,7 +237,7 @@ func (s *server) spTweakDataRequestHandler(w http.ResponseWriter,
 	r *http.Request) {
 
 	if s.spTweakFiles == nil {
-		sendError(w, status503, errUnavailableSPTweakDataTurnedOff)
+		sendError(w, status503, ErrUnavailableSPTweakDataTurnedOff)
 		return
 	}
 
@@ -255,12 +255,12 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 
 	// These kinds of requests aren't available in light mode.
 	if s.lightMode {
-		sendError(w, status503, errUnavailableInLightMode)
+		sendError(w, status503, ErrUnavailableInLightMode)
 		return
 	}
 
 	if !processor.isStartupComplete() {
-		sendError(w, status503, errStillStartingUp)
+		sendError(w, status503, ErrStillStartingUp)
 		return
 	}
 
@@ -319,12 +319,12 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 
 	// These kinds of requests aren't available in light mode.
 	if s.lightMode {
-		sendError(w, status503, errUnavailableInLightMode)
+		sendError(w, status503, ErrUnavailableInLightMode)
 		return
 	}
 
 	if !s.headerFiles.startupComplete.Load() {
-		sendError(w, status503, errStillStartingUp)
+		sendError(w, status503, ErrStillStartingUp)
 		return
 	}
 
@@ -432,7 +432,7 @@ func (s *server) blockRequestHandler(w http.ResponseWriter, r *http.Request) {
 	blockHash, err := parseRequestParamChainHash(r, "hash")
 	if err != nil {
 		sendError(w, status400, fmt.Errorf("%w: %w",
-			errInvalidBlockHash, err))
+			ErrInvalidBlockHash, err))
 		return
 	}
 
@@ -450,7 +450,7 @@ func (s *server) txOutProofRequestHandler(w http.ResponseWriter,
 
 	txHash, err := parseRequestParamChainHash(r, "txid")
 	if err != nil {
-		sendError(w, status400, fmt.Errorf("%w: %w", errInvalidTxHash,
+		sendError(w, status400, fmt.Errorf("%w: %w", ErrInvalidTxHash,
 			err))
 		return
 	}
@@ -492,7 +492,7 @@ func (s *server) txOutProofRequestHandler(w http.ResponseWriter,
 func (s *server) rawTxRequestHandler(w http.ResponseWriter, r *http.Request) {
 	txHash, err := parseRequestParamChainHash(r, "txid")
 	if err != nil {
-		sendError(w, status400, fmt.Errorf("%w: %w", errInvalidTxHash,
+		sendError(w, status400, fmt.Errorf("%w: %w", ErrInvalidTxHash,
 			err))
 		return
 	}
@@ -616,7 +616,7 @@ func parseRequestParamChainHash(r *http.Request, name string) (*chainhash.Hash,
 	blockHash := vars[name]
 
 	if len(blockHash) != hex.EncodedLen(chainhash.HashSize) {
-		return nil, errInvalidHashLength
+		return nil, ErrInvalidHashLength
 	}
 
 	hash, err := chainhash.NewHashFromStr(blockHash)

@@ -18,8 +18,7 @@ const (
 )
 
 func TestCFilterFilesUpdate(t *testing.T) {
-	testDir := ".unit-test-logs"
-	miner, backend, _, _ := setupBackend(t, testDir)
+	miner, backend, _, _ := setupBackend(t, unitTestDir)
 
 	// Mine initial blocks. The miner starts with 200 blocks already mined.
 	_ = miner.MineEmptyBlocks(initialBlocks - int(totalStartupBlocks))
