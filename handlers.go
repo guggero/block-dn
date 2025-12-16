@@ -658,6 +658,13 @@ func streamFile(w io.Writer, fileName string) error {
 		return err
 	}
 
+	defer func(f *os.File) {
+		err := f.Close()
+		if err != nil {
+			log.Errorf("Error closing file %s: %v", fileName, err)
+		}
+	}(f)
+
 	_, err = io.Copy(w, f)
 	return err
 }
