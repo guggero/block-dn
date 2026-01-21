@@ -44,8 +44,6 @@ $ docker run -d \
   -v $HOME/block-dn-testnet4/:/root/.block-dn \
   --restart=unless-stopped \
   --name=block-dn-testnet4 \
-  --hostname=block-dn-testnet4 \
-  --network=internal \
   guggero/block-dn \
   --base-dir=/root/.block-dn \
   --log-dir=logs \
