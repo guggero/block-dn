@@ -16,6 +16,12 @@ type Status struct {
 	EntriesPerSPTweakFile int32  `json:"entries_per_sptweak_file"`
 }
 
+type FeeRate struct {
+	FeeSatPerKVByte  int64 `json:"fee_sat_per_kvbyte"`
+	FeeSatPerKWeight int64 `json:"fee_sat_per_kweight"`
+	FeeSatPerVByte   int64 `json:"fee_sat_per_vbyte"`
+}
+
 type SPTweakBlock map[int32]string
 
 type SPTweakFile struct {

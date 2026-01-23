@@ -15,9 +15,12 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/btcsuite/btcd/btcjson"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/gorilla/mux"
+	"github.com/lightningnetwork/lnd/lnwallet/chainfee"
 )
 
 var (
@@ -75,6 +78,10 @@ var (
 	// hash is invalid.
 	errInvalidTxHash = errors.New("invalid transaction hash")
 
+	// errFeeEsimatesUnavailable is an error indicating the current fee
+	// rates cannot be estimated.
+	errFeeEsimatesUnavailable = errors.New("fee rate estimates unavailable")
+
 	//go:embed index.html
 	indexHTML string
 )
@@ -130,6 +137,9 @@ func (s *server) createRouter() *mux.Router {
 	)
 	router.HandleFunc(
 		"/tx/raw/{txid:[0-9a-f]+}", s.rawTxRequestHandler,
+	)
+	router.HandleFunc(
+		"/fees/estimate/{blocks:[0-9]+}", s.estimateFeeRequestHandler,
 	)
 
 	return router
@@ -246,6 +256,46 @@ func (s *server) spTweakDataRequestHandler(w http.ResponseWriter,
 		int64(s.spTweaksPerFile), s.spTweakFiles.serializeSPTweakData,
 		s.spTweakFiles,
 	)
+}
+
+func (s *server) estimateFeeRequestHandler(w http.ResponseWriter,
+	r *http.Request) {
+
+	confTarget, err := parseRequestParamInt64(r, "blocks")
+	if err != nil {
+		sendError(w, status500, errFeeEsimatesUnavailable)
+		return
+	}
+
+	feeRateResult, err := s.chain.EstimateSmartFee(
+		confTarget, &btcjson.EstimateModeConservative,
+	)
+	if err != nil {
+		sendError(w, status500, errFeeEsimatesUnavailable)
+		return
+	}
+
+	if len(feeRateResult.Errors) != 0 || feeRateResult.FeeRate == nil {
+		sendError(w, status500, errFeeEsimatesUnavailable)
+		return
+	}
+
+	log.Debugf("Estimated fee rate for conf target %d: %f BTC/kVB",
+		confTarget, *feeRateResult.FeeRate)
+
+	// Bitcoind returns the fee rate expressed as BTC/kVB.
+	feeKVB := chainfee.SatPerKVByte(
+		*feeRateResult.FeeRate * btcutil.SatoshiPerBitcoin,
+	)
+	feeKWU := feeKVB.FeePerKWeight()
+	feeVB := feeKWU.FeePerVByte()
+	rate := &FeeRate{
+		FeeSatPerKVByte:  int64(feeKVB),
+		FeeSatPerKWeight: int64(feeKWU),
+		FeeSatPerVByte:   int64(feeVB),
+	}
+
+	sendJSON(w, rate, maxAgeMemory)
 }
 
 func (s *server) heightBasedRequestHandler(w http.ResponseWriter,

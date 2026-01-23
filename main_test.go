@@ -235,6 +235,10 @@ var testCases = []struct {
 		name: "tx-raw",
 		fn:   testTxRaw,
 	},
+	{
+		name: "fees-estimate",
+		fn:   testFeeEstimate,
+	},
 }
 
 func testErrors(t *testing.T, ctx *testContext) {
@@ -357,6 +361,16 @@ func testIndex(t *testing.T, ctx *testContext) {
 	require.Contains(
 		t, string(data), "<title>Block Delivery Network</title>",
 	)
+	require.Equal(t, "*", headers.Get(HeaderCORS))
+}
+
+func testFeeEstimate(t *testing.T, ctx *testContext) {
+	var feeRate FeeRate
+	headers := ctx.fetchJSON(t, "fees/estimate/1", &feeRate)
+	t.Logf("Got fee rate: %+v", feeRate)
+	require.EqualValues(t, 1723, feeRate.FeeSatPerKVByte)
+	require.EqualValues(t, 430, feeRate.FeeSatPerKWeight)
+	require.EqualValues(t, 1, feeRate.FeeSatPerVByte)
 	require.Equal(t, "*", headers.Get(HeaderCORS))
 }
 
