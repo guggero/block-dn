@@ -21,13 +21,22 @@ import (
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/lightningnetwork/lnd/lnutils"
+	"github.com/lightninglabs/neutrino/cache/lru"
 )
 
 const (
 	DefaultSPTweaksPerFile = 2_000
 
 	DefaultRegtestSPTweaksPerFile = 2_000
+
+	// DefaultPrevOutCacheMiBytes is the default size we allow the Taproot
+	// previous output script cache to grow to. This is a hard limit as
+	// we're using an LRU cache, so once we reach this limit, we will evict
+	// the least recently used entry from the cache for each new entry we
+	// add. We set this to 1GiB by default, to make sure systems with
+	// limited resources can still use the SP tweak data indexing without
+	// running out of memory.
+	DefaultPrevOutCacheMiBytes = 1024
 
 	SPTweakFileDir = "silentpayments"
 
@@ -51,6 +60,19 @@ var (
 	)
 )
 
+// byteCacheEntry is a simple wrapper around a byte slice that implements the
+// cache.Value interface, which allows us to store previous output scripts in
+// the LRU cache.
+type byteCacheEntry []byte
+
+// Size determines how big this entry is in the cache. We need to account for
+// the size of the key (the outpoint) as well, which is 36 bytes (32 for the
+// txid and 4 for the index).
+// nolint:unparam
+func (b byteCacheEntry) Size() (uint64, error) {
+	return uint64(len(b)) + 36, nil
+}
+
 type prevOutCache struct {
 	numBlock   int32
 	numTx      int32
@@ -64,15 +86,19 @@ type prevOutCache struct {
 
 	chain *rpcclient.Client
 
-	cache lnutils.SyncMap[wire.OutPoint, []byte]
+	trPrevOutCache *lru.Cache[wire.OutPoint, byteCacheEntry]
 }
 
-func newPrevOutCache(chain *rpcclient.Client) *prevOutCache {
+func newPrevOutCache(chain *rpcclient.Client,
+	prevOutCacheSizeMiB uint16) *prevOutCache {
+
 	return &prevOutCache{
 		enabled:   true,
 		chain:     chain,
 		lastReset: time.Now(),
-		cache:     lnutils.SyncMap[wire.OutPoint, []byte]{},
+		trPrevOutCache: lru.NewCache[wire.OutPoint, byteCacheEntry](
+			uint64(prevOutCacheSizeMiB) * 1024 * 1024,
+		),
 	}
 }
 
@@ -83,7 +109,7 @@ func (p *prevOutCache) LogAndReset() {
 	log.Tracef("SP PrevOutCache: fetched %d previous txs (%d cache hits) "+
 		"for %d txns (%d with taproot outputs), cache size is %d, "+
 		"%.2f blocks per second", p.numTxFetch, p.numTrHit, p.numTx,
-		p.numTrTx, p.cache.Len(), blockPerSecond)
+		p.numTrTx, p.trPrevOutCache.Len(), blockPerSecond)
 
 	// Reset stats.
 	p.numBlock = 0
@@ -97,7 +123,7 @@ func (p *prevOutCache) LogAndReset() {
 
 func (p *prevOutCache) Disable() {
 	p.enabled = false
-	p.cache = lnutils.SyncMap[wire.OutPoint, []byte]{}
+	p.trPrevOutCache = lru.NewCache[wire.OutPoint, byteCacheEntry](0)
 	p.LogAndReset()
 }
 
@@ -109,7 +135,7 @@ func (p *prevOutCache) FetchPreviousOutputScript(op wire.OutPoint) ([]byte,
 	// We assume we only visit every transaction once, so each previous
 	// output we fetch is only fetched a single time. Thus, we can delete it
 	// from the cache after fetching it.
-	pkScript, ok := p.cache.LoadAndDelete(op)
+	pkScript, ok := p.trPrevOutCache.LoadAndDelete(op)
 	if ok {
 		p.numTrHit++
 
@@ -131,7 +157,7 @@ func (p *prevOutCache) FetchPreviousOutputScript(op wire.OutPoint) ([]byte,
 
 	pkScript = tx.MsgTx().TxOut[op.Index].PkScript
 	if p.enabled {
-		p.cache.Store(op, pkScript)
+		_, _ = p.trPrevOutCache.Put(op, pkScript)
 	}
 
 	return pkScript, nil
@@ -148,7 +174,7 @@ func (p *prevOutCache) AddOutputs(tx *wire.MsgTx) {
 			continue
 		}
 
-		p.cache.Store(wire.OutPoint{
+		_, _ = p.trPrevOutCache.Put(wire.OutPoint{
 			Hash:  txHash,
 			Index: uint32(txIndex),
 		}, txOut.PkScript)
@@ -161,7 +187,7 @@ func (p *prevOutCache) RemoveInputs(tx *wire.MsgTx) {
 	}
 
 	for _, txIn := range tx.TxIn {
-		p.cache.Delete(txIn.PreviousOutPoint)
+		p.trPrevOutCache.Delete(txIn.PreviousOutPoint)
 	}
 }
 
@@ -186,7 +212,7 @@ type spTweakFiles struct {
 
 func newSPTweakFiles(itemsPerFile int32, chain *rpcclient.Client,
 	quit <-chan struct{}, baseDir string, chainParams *chaincfg.Params,
-	h2hCache *heightToHashCache) *spTweakFiles {
+	h2hCache *heightToHashCache, prevOutCacheSizeMiB uint16) *spTweakFiles {
 
 	c := &spTweakFiles{
 		quit:          quit,
@@ -195,7 +221,7 @@ func newSPTweakFiles(itemsPerFile int32, chain *rpcclient.Client,
 		chain:         chain,
 		chainParams:   chainParams,
 		h2hCache:      h2hCache,
-		prevOutCache:  newPrevOutCache(chain),
+		prevOutCache:  newPrevOutCache(chain, prevOutCacheSizeMiB),
 	}
 	c.clearData()
 

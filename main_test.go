@@ -810,6 +810,7 @@ func TestBlockDN(t *testing.T) {
 		false, true, dataDir, listenAddr, &backendCfg,
 		unittest.NetParams, 6, DefaultRegtestHeadersPerFile,
 		DefaultRegtestFiltersPerFile, DefaultRegtestSPTweaksPerFile,
+		DefaultPrevOutCacheMiBytes,
 	)
 	ctx := &testContext{
 		miner:   miner,

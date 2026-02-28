@@ -36,8 +36,9 @@ type mainCommand struct {
 	regtest  bool
 	signet   bool
 
-	lightMode        bool
-	indexSPTweakData bool
+	lightMode           bool
+	indexSPTweakData    bool
+	prevOutCacheSizeMiB uint16
 
 	baseDir   string
 	logDir    string
@@ -142,6 +143,7 @@ func main() {
 				cc.listenAddr, cc.bitcoindConfig, chainParams,
 				cc.reOrgSafeDepth, headersPerFile,
 				filtersPerFile, spTweaksPerFile,
+				cc.prevOutCacheSizeMiB,
 			)
 			err := server.start()
 			if err != nil {
@@ -201,6 +203,14 @@ func main() {
 			"scan the chain for inbound SP more efficiently; "+
 			"this requires every block since the activation of "+
 			"Taproot to be indexed which may take a while",
+	)
+	cc.cmd.PersistentFlags().Uint16Var(
+		&cc.prevOutCacheSizeMiB, "prev-out-cache-size-mib",
+		DefaultPrevOutCacheMiBytes, "The size of the in-memory "+
+			"previous output cache in MiB; this cache is only "+
+			"used if --index-sp-tweak-data is enabled and stores "+
+			"previous outputs of transactions to speed up "+
+			"indexing of SP tweak data",
 	)
 	cc.cmd.PersistentFlags().StringVar(
 		&cc.baseDir, "base-dir", "", "The base directory "+

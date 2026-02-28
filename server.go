@@ -34,9 +34,10 @@ type server struct {
 	router           *mux.Router
 	httpServer       *http.Server
 
-	headersPerFile  int32
-	filtersPerFile  int32
-	spTweaksPerFile int32
+	headersPerFile      int32
+	filtersPerFile      int32
+	spTweaksPerFile     int32
+	spTweakCacheSizeMiB uint16
 
 	h2hCache     *heightToHashCache
 	headerFiles  *headerFiles
@@ -51,7 +52,7 @@ type server struct {
 func newServer(lightMode, indexSPTweakData bool, baseDir, listenAddr string,
 	chainCfg *rpcclient.ConnConfig, chainParams *chaincfg.Params,
 	reOrgSafeDepth uint32, headersPerFile, filtersPerFile,
-	spTweaksPerFile int32) *server {
+	spTweaksPerFile int32, spTweakCacheSizeMiB uint16) *server {
 
 	s := &server{
 		lightMode:        lightMode,
@@ -62,9 +63,10 @@ func newServer(lightMode, indexSPTweakData bool, baseDir, listenAddr string,
 		chainParams:      chainParams,
 		reOrgSafeDepth:   reOrgSafeDepth,
 
-		headersPerFile:  headersPerFile,
-		filtersPerFile:  filtersPerFile,
-		spTweaksPerFile: spTweaksPerFile,
+		headersPerFile:      headersPerFile,
+		filtersPerFile:      filtersPerFile,
+		spTweaksPerFile:     spTweaksPerFile,
+		spTweakCacheSizeMiB: spTweakCacheSizeMiB,
 
 		errs: fn.NewConcurrentQueue[error](2),
 		quit: make(chan struct{}),
@@ -197,7 +199,7 @@ func (s *server) start() error {
 
 	s.spTweakFiles = newSPTweakFiles(
 		s.spTweaksPerFile, s.chain, s.quit, s.baseDir, s.chainParams,
-		s.h2hCache,
+		s.h2hCache, s.spTweakCacheSizeMiB,
 	)
 
 	s.wg.Add(1)

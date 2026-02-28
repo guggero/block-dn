@@ -86,7 +86,7 @@ func TestSPTweakDataFilesUpdate(t *testing.T) {
 	h2hCache := newH2HCache(backend)
 	hf := newSPTweakFiles(
 		tweakBlocksPerFile, backend, quit, dataDir, &testParams,
-		h2hCache,
+		h2hCache, DefaultPrevOutCacheMiBytes,
 	)
 
 	var wg sync.WaitGroup
@@ -120,7 +120,7 @@ func TestSPTweakDataFilesUpdate(t *testing.T) {
 	quit = make(chan struct{})
 	hf = newSPTweakFiles(
 		tweakBlocksPerFile, backend, quit, dataDir, &testParams,
-		h2hCache,
+		h2hCache, DefaultPrevOutCacheMiBytes,
 	)
 
 	// Wait for the final blocks to be written.
@@ -169,7 +169,7 @@ func TestSilentPaymentsDetection(t *testing.T) {
 	h2hCache := newH2HCache(backend)
 	hf := newSPTweakFiles(
 		tweakBlocksPerFile, backend, quit, dataDir, &testParams,
-		h2hCache,
+		h2hCache, DefaultPrevOutCacheMiBytes,
 	)
 
 	// Wait for the initial blocks to be written.
