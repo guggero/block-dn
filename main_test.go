@@ -228,6 +228,14 @@ var testCases = []struct {
 		fn:   testSPTweakData,
 	},
 	{
+		name: "block",
+		fn:   testBlock,
+	},
+	{
+		name: "block-spenttxouts",
+		fn:   testBlockSpentTxOuts,
+	},
+	{
 		name: "tx-out-proof",
 		fn:   testTxOutProof,
 	},
@@ -734,6 +742,50 @@ func testSPTweakData(t *testing.T, ctx *testContext) {
 	ctx.waitFilesSync(t)
 }
 
+func testBlock(t *testing.T, ctx *testContext) {
+	// We start with the latest block.
+	_, bestHash := ctx.bestBlock(t)
+	block, err := ctx.backend.GetBlock(&bestHash)
+	require.NoError(t, err)
+
+	require.Len(t, block.Transactions, 1)
+
+	var rawBlock bytes.Buffer
+	require.NoError(t, block.Serialize(&rawBlock))
+
+	data, headers := ctx.fetchBinary(
+		t, fmt.Sprintf("block/%s", block.BlockHash().String()),
+	)
+	require.NotEmpty(t, data)
+	require.Equal(t, rawBlock.Bytes(), data)
+
+	require.Contains(t, headers, HeaderCache)
+	require.Equal(t, cacheDisk, headers.Get(HeaderCache))
+	require.Equal(t, "*", headers.Get(HeaderCORS))
+}
+
+func testBlockSpentTxOuts(t *testing.T, ctx *testContext) {
+	// We start with the latest block.
+	_, bestHash := ctx.bestBlock(t)
+	block, err := ctx.backend.GetBlock(&bestHash)
+	require.NoError(t, err)
+
+	require.Len(t, block.Transactions, 1)
+
+	data, headers := ctx.fetchBinary(
+		t, fmt.Sprintf("block/%s/spenttxouts",
+			block.BlockHash().String()),
+	)
+	require.NotEmpty(t, data)
+
+	expected := "[[]]\n"
+	require.Equal(t, expected, string(data))
+
+	require.Contains(t, headers, HeaderCache)
+	require.Equal(t, cacheDisk, headers.Get(HeaderCache))
+	require.Equal(t, "*", headers.Get(HeaderCORS))
+}
+
 func testTxOutProof(t *testing.T, ctx *testContext) {
 	// We start with the latest block.
 	bestHeight, bestHash := ctx.bestBlock(t)
@@ -952,6 +1004,7 @@ func setupBackend(t *testing.T, testDir string) (*lntestminer.HarnessMiner,
 
 	backend, backendCfg, bitcoindCfg, cleanup := newBitcoind(
 		t, testDir, []string{
+			"-rest",
 			"-regtest",
 			"-txindex",
 			"-disablewallet",

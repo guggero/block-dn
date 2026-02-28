@@ -133,6 +133,10 @@ func (s *server) createRouter() *mux.Router {
 	)
 	router.HandleFunc("/block/{hash:[0-9a-f]+}", s.blockRequestHandler)
 	router.HandleFunc(
+		"/block/{hash:[0-9a-f]+}/spenttxouts",
+		s.blockSpentTxOutsRequestHandler,
+	)
+	router.HandleFunc(
 		"/tx/out-proof/{txid:[0-9a-f]+}", s.txOutProofRequestHandler,
 	)
 	router.HandleFunc(
@@ -493,6 +497,71 @@ func (s *server) blockRequestHandler(w http.ResponseWriter, r *http.Request) {
 	sendBinary(w, block, maxAgeDisk)
 }
 
+func (s *server) blockSpentTxOutsRequestHandler(w http.ResponseWriter,
+	r *http.Request) {
+
+	blockHash, err := parseRequestParamChainHash(r, "hash")
+	if err != nil {
+		sendError(w, status400, fmt.Errorf("%w: %w",
+			errInvalidBlockHash, err))
+		return
+	}
+
+	// We only allow "bin" or "hex to be set, anything else will default to
+	// "json", which is the easiest format to read for humans.
+	format := "json"
+	queryFormat := r.URL.Query().Get("format")
+	if queryFormat == "bin" || queryFormat == "hex" {
+		format = queryFormat
+	}
+
+	protocol := "https"
+	if s.chainCfg.DisableTLS {
+		protocol = "http"
+	}
+	url := fmt.Sprintf("%s://%s/rest/spenttxouts/%s.%s", protocol,
+		s.chainCfg.Host, blockHash.String(), format)
+
+	client := &http.Client{
+		Timeout: defaultTimeout,
+	}
+
+	req, err := http.NewRequestWithContext(
+		r.Context(), http.MethodGet, url, nil,
+	)
+	if err != nil {
+		sendError(w, status500, err)
+		return
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		code := 0
+		if resp != nil {
+			code = resp.StatusCode
+		}
+
+		log.Errorf("Error %d fetching spent tx outs from %s: %v",
+			code, url, err)
+		sendError(w, status500, err)
+		return
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		log.Errorf("Error fetching spent tx outs from %s: %s",
+			url, string(body))
+		sendError(w, resp.StatusCode, fmt.Errorf("upstream error: "+
+			"code %d", resp.StatusCode))
+		return
+	}
+
+	sendJsonCopy(w, resp.Body, maxAgeDisk)
+}
+
 func (s *server) txOutProofRequestHandler(w http.ResponseWriter,
 	r *http.Request) {
 
@@ -615,6 +684,17 @@ func sendRawBytes(w http.ResponseWriter, payload []byte, maxAge time.Duration) {
 	_, err := w.Write(payload)
 	if err != nil {
 		log.Errorf("Error serializing: %v", err)
+	}
+}
+
+func sendJsonCopy(w http.ResponseWriter, r io.Reader, maxAge time.Duration) {
+	addCacheHeaders(w, maxAge)
+	addCorsHeaders(w)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, err := io.Copy(w, r)
+	if err != nil {
+		log.Errorf("Error copying response: %v", err)
 	}
 }
 
