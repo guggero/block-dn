@@ -392,6 +392,7 @@ func testStatus(t *testing.T, ctx *testContext) {
 	require.Equal(
 		t, ctx.server.spTweaksPerFile, status.EntriesPerSPTweakFile,
 	)
+	require.True(t, status.AllFilesSynced)
 
 	require.Contains(t, headers, HeaderCache)
 	require.Equal(t, cacheMemory, headers.Get(HeaderCache))

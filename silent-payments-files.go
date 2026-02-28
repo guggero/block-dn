@@ -34,8 +34,6 @@ const (
 	SPTweakFileSuffix             = ".sptweak"
 	SPTweakFileNamePattern        = "%s/block-%07d-%07d.sptweak"
 	SPTweakFileNameExtractPattern = "block-[0-9]{7}-([0-9]{7})\\.sptweak"
-
-	BlockFilePattern = "%s/blk%05d.dat"
 )
 
 var (

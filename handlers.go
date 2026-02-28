@@ -170,12 +170,13 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	var (
-		spHeight int32
-		spSynced bool
+		spHeight     int32
+		filterHeight = s.cFilterFiles.currentHeight.Load()
+		allSynced    = bestHeight == filterHeight
 	)
 	if s.spTweakFiles != nil {
 		spHeight = s.spTweakFiles.currentHeight.Load()
-		spSynced = bestHeight == spHeight
+		allSynced = allSynced && bestHeight == spHeight
 	}
 
 	status := &Status{
@@ -183,17 +184,14 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 		ChainName:             s.chainParams.Name,
 		BestBlockHeight:       bestHeight,
 		BestBlockHash:         bestBlock.String(),
-		BestFilterHeight:      s.cFilterFiles.currentHeight.Load(),
+		BestFilterHeight:      filterHeight,
 		BestFilterHeader:      bestFilter.String(),
 		BestSPTweakHeight:     spHeight,
 		EntriesPerHeaderFile:  s.headersPerFile,
 		EntriesPerFilterFile:  s.filtersPerFile,
 		EntriesPerSPTweakFile: s.spTweaksPerFile,
+		AllFilesSynced:        allSynced,
 	}
-
-	// nolint:gocritic
-	status.AllFilesSynced = bestHeight == status.BestFilterHeight &&
-		spSynced
 
 	sendJSON(w, status, maxAgeMemory)
 }
