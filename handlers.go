@@ -707,8 +707,17 @@ func addCacheHeaders(w http.ResponseWriter, maxAge time.Duration) {
 		return
 	}
 
+	// Make caching even more aggressive if the content is immutable.
+	if maxAge >= maxAgeDisk {
+		w.Header().Add(
+			HeaderCache, fmt.Sprintf("public, max-age=%d, "+
+				"immutable", int64(maxAge.Seconds())),
+		)
+	}
+
 	w.Header().Add(
-		HeaderCache, fmt.Sprintf("max-age=%d", int64(maxAge.Seconds())),
+		HeaderCache, fmt.Sprintf("public, max-age=%d",
+			int64(maxAge.Seconds())),
 	)
 }
 

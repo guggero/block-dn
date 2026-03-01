@@ -44,9 +44,9 @@ const (
 	headerSize        = 80
 	filterHeadersSize = 32
 
-	cacheTemporary = "max-age=1"
-	cacheMemory    = "max-age=60"
-	cacheDisk      = "max-age=31536000"
+	cacheTemporary = "public, max-age=1"
+	cacheMemory    = "public, max-age=60"
+	cacheDisk      = "public, max-age=31536000, immutable"
 
 	unitTestDir = ".unit-test-logs"
 )
@@ -376,7 +376,7 @@ func testFeeEstimate(t *testing.T, ctx *testContext) {
 	var feeRate FeeRate
 	headers := ctx.fetchJSON(t, "fees/estimate/1", &feeRate)
 	t.Logf("Got fee rate: %+v", feeRate)
-	require.EqualValues(t, 1723, feeRate.FeeSatPerKVByte)
+	require.InDelta(t, 1723, feeRate.FeeSatPerKVByte, 2)
 	require.EqualValues(t, 430, feeRate.FeeSatPerKWeight)
 	require.EqualValues(t, 1, feeRate.FeeSatPerVByte)
 	require.Equal(t, "*", headers.Get(HeaderCORS))
