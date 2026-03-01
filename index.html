@@ -295,6 +295,21 @@
                 </td>
             </tr>
             <tr>
+                <td><code>/utxo/&lt;hash&gt;-&lt;vout&gt;/?[mempool=true][&format=json|hex|bin]</code></td>
+                <td>
+                    Returns the previous outputs of all transactions that were
+                    spent in the block with the given hash. The default response
+                    format is JSON but the format can be changed to binary or
+                    hex by adding a query parameter (e.g.
+                    <code>?format=bin</code> or  <code>?format=hex</code>).
+                </td>
+                <td>
+                    <a href="https://block-dn.org/utxo/0e3e2357e806b6cdb1f70b54c3a3a17b6714ee1f0e68bebb44a74b1efd512098-0/?mempool=true&format=json">
+                        block-dn.org/utxo/0e3e2357e806b6cdb1f70b54c3a3a17b6714ee1f0e68bebb44a74b1efd512098-0/?mempool=true&format=json
+                    </a>
+                </td>
+            </tr>
+            <tr>
                 <td><code>/fees/estimate/&lt;blocks&gt;</code></td>
                 <td>
                     Returns a JSON response with an estimated fee rate for the

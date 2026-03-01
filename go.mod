@@ -12,6 +12,7 @@ require (
 	github.com/btcsuite/btcwallet v0.16.17
 	github.com/btcsuite/btcwallet/walletdb v1.5.1
 	github.com/gorilla/mux v1.8.0
+	github.com/lightninglabs/neutrino/cache v1.1.2
 	github.com/lightningnetwork/lnd v0.19.3-beta
 	github.com/lightningnetwork/lnd/fn/v2 v2.0.9
 	github.com/spf13/cobra v1.10.1
@@ -62,7 +63,6 @@ require (
 	github.com/bombsimon/wsl/v5 v5.3.0 // indirect
 	github.com/breml/bidichk v0.3.3 // indirect
 	github.com/breml/errchkjson v0.4.1 // indirect
-	github.com/btcsuite/btcd/v2transport v1.0.1 // indirect
 	github.com/btcsuite/btclog v1.0.0 // indirect
 	github.com/btcsuite/btcwallet/wallet/txauthor v1.3.5 // indirect
 	github.com/btcsuite/btcwallet/wallet/txrules v1.2.2 // indirect
@@ -207,7 +207,6 @@ require (
 	github.com/lib/pq v1.10.9 // indirect
 	github.com/lightninglabs/gozmq v0.0.0-20191113021534-d20a764486bf // indirect
 	github.com/lightninglabs/neutrino v0.16.1 // indirect
-	github.com/lightninglabs/neutrino/cache v1.1.2 // indirect
 	github.com/lightningnetwork/lightning-onion v1.2.1-0.20240815225420-8b40adf04ab9 // indirect
 	github.com/lightningnetwork/lnd/cert v1.2.2 // indirect
 	github.com/lightningnetwork/lnd/clock v1.1.1 // indirect
@@ -342,7 +341,7 @@ require (
 	go.uber.org/multierr v1.10.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
 	golang.org/x/crypto v0.43.0 // indirect
-	golang.org/x/exp v0.0.0-20240909161429-701f63a606c0 // indirect
+	golang.org/x/exp v0.0.0-20250811191247-51f88131bc50 // indirect
 	golang.org/x/exp/typeparams v0.0.0-20251023183803-a4bb9ffd2546 // indirect
 	golang.org/x/mod v0.29.0 // indirect
 	golang.org/x/net v0.46.0 // indirect
@@ -384,7 +383,7 @@ tool (
 )
 
 // Needed for the GetTxOutProof RPC call.
-replace github.com/btcsuite/btcd => github.com/guggero/btcd v0.20.1-beta.0.20251202195639-45154ad3fb60
+replace github.com/btcsuite/btcd => github.com/guggero/btcd v0.20.1-beta.0.20260307160528-ea29f7d958b3
 
 // Needed for the Silent Payments library.
 replace github.com/btcsuite/btcd/btcutil => github.com/guggero/btcd/btcutil v0.0.0-20251214193129-415da0a46ecb

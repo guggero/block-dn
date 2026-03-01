@@ -78,6 +78,10 @@ var (
 	// hash is invalid.
 	errInvalidTxHash = errors.New("invalid transaction hash")
 
+	// errInvalidOutputIndex is an error indicating that the provided output
+	// index (vout) is invalid.
+	errInvalidOutputIndex = errors.New("invalid output index")
+
 	// errFeeEsimatesUnavailable is an error indicating the current fee
 	// rates cannot be estimated.
 	errFeeEsimatesUnavailable = errors.New("fee rate estimates unavailable")
@@ -141,6 +145,9 @@ func (s *server) createRouter() *mux.Router {
 	)
 	router.HandleFunc(
 		"/tx/raw/{txid:[0-9a-f]+}", s.rawTxRequestHandler,
+	)
+	router.HandleFunc(
+		"/utxo/{txid:[0-9a-f]+}-{vout:[0-9]+}", s.utxoRequestHandler,
 	)
 	router.HandleFunc(
 		"/fees/estimate/{blocks:[0-9]+}", s.estimateFeeRequestHandler,
@@ -621,6 +628,79 @@ func (s *server) rawTxRequestHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sendBinary(w, tx.MsgTx(), maxAgeDisk)
+}
+
+func (s *server) utxoRequestHandler(w http.ResponseWriter, r *http.Request) {
+	txHash, err := parseRequestParamChainHash(r, "txid")
+	if err != nil {
+		sendError(w, status400, fmt.Errorf("%w: %w",
+			errInvalidBlockHash, err))
+		return
+	}
+
+	vOut, err := parseRequestParamInt64(r, "vout")
+	if err != nil {
+		sendError(w, status400, fmt.Errorf("%w: %w",
+			errInvalidOutputIndex, err))
+		return
+	}
+
+	mempool := ""
+	if r.URL.Query().Get("mempool") == "true" {
+		mempool = "checkmempool/"
+	}
+
+	// We only allow "bin" or "hex to be set, anything else will default to
+	// "json", which is the easiest format to read for humans.
+	format := "json"
+	queryFormat := r.URL.Query().Get("format")
+	if queryFormat == "bin" || queryFormat == "hex" {
+		format = queryFormat
+	}
+
+	protocol := "https"
+	if s.chainCfg.DisableTLS {
+		protocol = "http"
+	}
+	url := fmt.Sprintf("%s://%s/rest/getutxos/%s%s-%d.%s", protocol,
+		s.chainCfg.Host, mempool, txHash.String(), vOut, format)
+
+	client := &http.Client{
+		Timeout: defaultTimeout,
+	}
+
+	req, err := http.NewRequestWithContext(
+		r.Context(), http.MethodGet, url, nil,
+	)
+	if err != nil {
+		sendError(w, status500, err)
+		return
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		code := 0
+		if resp != nil {
+			code = resp.StatusCode
+		}
+
+		log.Errorf("Error %d fetching utxo from %s: %v", code, url, err)
+		sendError(w, status500, err)
+		return
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		log.Errorf("Error fetching utxo from %s: %s", url, string(body))
+		sendError(w, resp.StatusCode, fmt.Errorf("upstream error: "+
+			"code %d", resp.StatusCode))
+		return
+	}
+
+	sendJsonCopy(w, resp.Body, maxAgeMemory)
 }
 
 func (s *server) checkStartHeight(processor blockProcessor, height int64,
