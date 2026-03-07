@@ -35,6 +35,10 @@ endif
 TEST_TAGS := bitcoind integration dev
 TEST_FLAGS = -test.timeout=20m -tags="$(TEST_TAGS)"
 
+ifneq ($(case),)
+TEST_FLAGS += -run=$(case)
+endif
+
 UNIT := $(GOLIST) | $(XARGS) env $(GOTEST) $(TEST_FLAGS)
 LDFLAGS := -X main.Commit=$(shell git describe --tags)
 RELEASE_LDFLAGS := -s -w -buildid= $(LDFLAGS)

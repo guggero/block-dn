@@ -78,6 +78,10 @@ var (
 	// hash is invalid.
 	errInvalidTxHash = errors.New("invalid transaction hash")
 
+	// errInvalidOutputIndex is an error indicating that the provided output
+	// index (vout) is invalid.
+	errInvalidOutputIndex = errors.New("invalid output index")
+
 	// errFeeEsimatesUnavailable is an error indicating the current fee
 	// rates cannot be estimated.
 	errFeeEsimatesUnavailable = errors.New("fee rate estimates unavailable")
@@ -133,10 +137,17 @@ func (s *server) createRouter() *mux.Router {
 	)
 	router.HandleFunc("/block/{hash:[0-9a-f]+}", s.blockRequestHandler)
 	router.HandleFunc(
+		"/block/{hash:[0-9a-f]+}/spenttxouts",
+		s.blockSpentTxOutsRequestHandler,
+	)
+	router.HandleFunc(
 		"/tx/out-proof/{txid:[0-9a-f]+}", s.txOutProofRequestHandler,
 	)
 	router.HandleFunc(
 		"/tx/raw/{txid:[0-9a-f]+}", s.rawTxRequestHandler,
+	)
+	router.HandleFunc(
+		"/utxo/{txid:[0-9a-f]+}-{vout:[0-9]+}", s.utxoRequestHandler,
 	)
 	router.HandleFunc(
 		"/fees/estimate/{blocks:[0-9]+}", s.estimateFeeRequestHandler,
@@ -170,12 +181,13 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	var (
-		spHeight int32
-		spSynced bool
+		spHeight     int32
+		filterHeight = s.cFilterFiles.currentHeight.Load()
+		allSynced    = bestHeight == filterHeight
 	)
 	if s.spTweakFiles != nil {
 		spHeight = s.spTweakFiles.currentHeight.Load()
-		spSynced = bestHeight == spHeight
+		allSynced = allSynced && bestHeight == spHeight
 	}
 
 	status := &Status{
@@ -183,17 +195,14 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 		ChainName:             s.chainParams.Name,
 		BestBlockHeight:       bestHeight,
 		BestBlockHash:         bestBlock.String(),
-		BestFilterHeight:      s.cFilterFiles.currentHeight.Load(),
+		BestFilterHeight:      filterHeight,
 		BestFilterHeader:      bestFilter.String(),
 		BestSPTweakHeight:     spHeight,
 		EntriesPerHeaderFile:  s.headersPerFile,
 		EntriesPerFilterFile:  s.filtersPerFile,
 		EntriesPerSPTweakFile: s.spTweaksPerFile,
+		AllFilesSynced:        allSynced,
 	}
-
-	// nolint:gocritic
-	status.AllFilesSynced = bestHeight == status.BestFilterHeight &&
-		spSynced
 
 	sendJSON(w, status, maxAgeMemory)
 }
@@ -495,6 +504,71 @@ func (s *server) blockRequestHandler(w http.ResponseWriter, r *http.Request) {
 	sendBinary(w, block, maxAgeDisk)
 }
 
+func (s *server) blockSpentTxOutsRequestHandler(w http.ResponseWriter,
+	r *http.Request) {
+
+	blockHash, err := parseRequestParamChainHash(r, "hash")
+	if err != nil {
+		sendError(w, status400, fmt.Errorf("%w: %w",
+			errInvalidBlockHash, err))
+		return
+	}
+
+	// We only allow "bin" or "hex to be set, anything else will default to
+	// "json", which is the easiest format to read for humans.
+	format := "json"
+	queryFormat := r.URL.Query().Get("format")
+	if queryFormat == "bin" || queryFormat == "hex" {
+		format = queryFormat
+	}
+
+	protocol := "https"
+	if s.chainCfg.DisableTLS {
+		protocol = "http"
+	}
+	url := fmt.Sprintf("%s://%s/rest/spenttxouts/%s.%s", protocol,
+		s.chainCfg.Host, blockHash.String(), format)
+
+	client := &http.Client{
+		Timeout: defaultTimeout,
+	}
+
+	req, err := http.NewRequestWithContext(
+		r.Context(), http.MethodGet, url, nil,
+	)
+	if err != nil {
+		sendError(w, status500, err)
+		return
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		code := 0
+		if resp != nil {
+			code = resp.StatusCode
+		}
+
+		log.Errorf("Error %d fetching spent tx outs from %s: %v",
+			code, url, err)
+		sendError(w, status500, err)
+		return
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		log.Errorf("Error fetching spent tx outs from %s: %s",
+			url, string(body))
+		sendError(w, resp.StatusCode, fmt.Errorf("upstream error: "+
+			"code %d", resp.StatusCode))
+		return
+	}
+
+	sendJsonCopy(w, resp.Body, maxAgeDisk)
+}
+
 func (s *server) txOutProofRequestHandler(w http.ResponseWriter,
 	r *http.Request) {
 
@@ -554,6 +628,79 @@ func (s *server) rawTxRequestHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sendBinary(w, tx.MsgTx(), maxAgeDisk)
+}
+
+func (s *server) utxoRequestHandler(w http.ResponseWriter, r *http.Request) {
+	txHash, err := parseRequestParamChainHash(r, "txid")
+	if err != nil {
+		sendError(w, status400, fmt.Errorf("%w: %w",
+			errInvalidBlockHash, err))
+		return
+	}
+
+	vOut, err := parseRequestParamInt64(r, "vout")
+	if err != nil {
+		sendError(w, status400, fmt.Errorf("%w: %w",
+			errInvalidOutputIndex, err))
+		return
+	}
+
+	mempool := ""
+	if r.URL.Query().Get("mempool") == "true" {
+		mempool = "checkmempool/"
+	}
+
+	// We only allow "bin" or "hex to be set, anything else will default to
+	// "json", which is the easiest format to read for humans.
+	format := "json"
+	queryFormat := r.URL.Query().Get("format")
+	if queryFormat == "bin" || queryFormat == "hex" {
+		format = queryFormat
+	}
+
+	protocol := "https"
+	if s.chainCfg.DisableTLS {
+		protocol = "http"
+	}
+	url := fmt.Sprintf("%s://%s/rest/getutxos/%s%s-%d.%s", protocol,
+		s.chainCfg.Host, mempool, txHash.String(), vOut, format)
+
+	client := &http.Client{
+		Timeout: defaultTimeout,
+	}
+
+	req, err := http.NewRequestWithContext(
+		r.Context(), http.MethodGet, url, nil,
+	)
+	if err != nil {
+		sendError(w, status500, err)
+		return
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		code := 0
+		if resp != nil {
+			code = resp.StatusCode
+		}
+
+		log.Errorf("Error %d fetching utxo from %s: %v", code, url, err)
+		sendError(w, status500, err)
+		return
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		log.Errorf("Error fetching utxo from %s: %s", url, string(body))
+		sendError(w, resp.StatusCode, fmt.Errorf("upstream error: "+
+			"code %d", resp.StatusCode))
+		return
+	}
+
+	sendJsonCopy(w, resp.Body, maxAgeMemory)
 }
 
 func (s *server) checkStartHeight(processor blockProcessor, height int64,
@@ -620,6 +767,17 @@ func sendRawBytes(w http.ResponseWriter, payload []byte, maxAge time.Duration) {
 	}
 }
 
+func sendJsonCopy(w http.ResponseWriter, r io.Reader, maxAge time.Duration) {
+	addCacheHeaders(w, maxAge)
+	addCorsHeaders(w)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, err := io.Copy(w, r)
+	if err != nil {
+		log.Errorf("Error copying response: %v", err)
+	}
+}
+
 func addCacheHeaders(w http.ResponseWriter, maxAge time.Duration) {
 	// A max-age of 0 means no caching at all, as something is not safe
 	// to cache yet.
@@ -629,8 +787,17 @@ func addCacheHeaders(w http.ResponseWriter, maxAge time.Duration) {
 		return
 	}
 
+	// Make caching even more aggressive if the content is immutable.
+	if maxAge >= maxAgeDisk {
+		w.Header().Add(
+			HeaderCache, fmt.Sprintf("public, max-age=%d, "+
+				"immutable", int64(maxAge.Seconds())),
+		)
+	}
+
 	w.Header().Add(
-		HeaderCache, fmt.Sprintf("max-age=%d", int64(maxAge.Seconds())),
+		HeaderCache, fmt.Sprintf("public, max-age=%d",
+			int64(maxAge.Seconds())),
 	)
 }
 
@@ -707,6 +874,13 @@ func streamFile(w io.Writer, fileName string) error {
 	if err != nil {
 		return err
 	}
+
+	defer func(f *os.File) {
+		err := f.Close()
+		if err != nil {
+			log.Errorf("Error closing file %s: %v", fileName, err)
+		}
+	}(f)
 
 	_, err = io.Copy(w, f)
 	return err

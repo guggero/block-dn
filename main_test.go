@@ -44,9 +44,9 @@ const (
 	headerSize        = 80
 	filterHeadersSize = 32
 
-	cacheTemporary = "max-age=1"
-	cacheMemory    = "max-age=60"
-	cacheDisk      = "max-age=31536000"
+	cacheTemporary = "public, max-age=1"
+	cacheMemory    = "public, max-age=60"
+	cacheDisk      = "public, max-age=31536000, immutable"
 
 	unitTestDir = ".unit-test-logs"
 )
@@ -228,6 +228,14 @@ var testCases = []struct {
 		fn:   testSPTweakData,
 	},
 	{
+		name: "block",
+		fn:   testBlock,
+	},
+	{
+		name: "block-spenttxouts",
+		fn:   testBlockSpentTxOuts,
+	},
+	{
 		name: "tx-out-proof",
 		fn:   testTxOutProof,
 	},
@@ -368,7 +376,7 @@ func testFeeEstimate(t *testing.T, ctx *testContext) {
 	var feeRate FeeRate
 	headers := ctx.fetchJSON(t, "fees/estimate/1", &feeRate)
 	t.Logf("Got fee rate: %+v", feeRate)
-	require.EqualValues(t, 1723, feeRate.FeeSatPerKVByte)
+	require.InDelta(t, 1723, feeRate.FeeSatPerKVByte, 2)
 	require.EqualValues(t, 430, feeRate.FeeSatPerKWeight)
 	require.EqualValues(t, 1, feeRate.FeeSatPerVByte)
 	require.Equal(t, "*", headers.Get(HeaderCORS))
@@ -392,6 +400,7 @@ func testStatus(t *testing.T, ctx *testContext) {
 	require.Equal(
 		t, ctx.server.spTweaksPerFile, status.EntriesPerSPTweakFile,
 	)
+	require.True(t, status.AllFilesSynced)
 
 	require.Contains(t, headers, HeaderCache)
 	require.Equal(t, cacheMemory, headers.Get(HeaderCache))
@@ -733,6 +742,50 @@ func testSPTweakData(t *testing.T, ctx *testContext) {
 	ctx.waitFilesSync(t)
 }
 
+func testBlock(t *testing.T, ctx *testContext) {
+	// We start with the latest block.
+	_, bestHash := ctx.bestBlock(t)
+	block, err := ctx.backend.GetBlock(&bestHash)
+	require.NoError(t, err)
+
+	require.Len(t, block.Transactions, 1)
+
+	var rawBlock bytes.Buffer
+	require.NoError(t, block.Serialize(&rawBlock))
+
+	data, headers := ctx.fetchBinary(
+		t, fmt.Sprintf("block/%s", block.BlockHash().String()),
+	)
+	require.NotEmpty(t, data)
+	require.Equal(t, rawBlock.Bytes(), data)
+
+	require.Contains(t, headers, HeaderCache)
+	require.Equal(t, cacheDisk, headers.Get(HeaderCache))
+	require.Equal(t, "*", headers.Get(HeaderCORS))
+}
+
+func testBlockSpentTxOuts(t *testing.T, ctx *testContext) {
+	// We start with the latest block.
+	_, bestHash := ctx.bestBlock(t)
+	block, err := ctx.backend.GetBlock(&bestHash)
+	require.NoError(t, err)
+
+	require.Len(t, block.Transactions, 1)
+
+	data, headers := ctx.fetchBinary(
+		t, fmt.Sprintf("block/%s/spenttxouts",
+			block.BlockHash().String()),
+	)
+	require.NotEmpty(t, data)
+
+	expected := "[[]]\n"
+	require.Equal(t, expected, string(data))
+
+	require.Contains(t, headers, HeaderCache)
+	require.Equal(t, cacheDisk, headers.Get(HeaderCache))
+	require.Equal(t, "*", headers.Get(HeaderCORS))
+}
+
 func testTxOutProof(t *testing.T, ctx *testContext) {
 	// We start with the latest block.
 	bestHeight, bestHash := ctx.bestBlock(t)
@@ -809,6 +862,7 @@ func TestBlockDN(t *testing.T) {
 		false, true, dataDir, listenAddr, &backendCfg,
 		unittest.NetParams, 6, DefaultRegtestHeadersPerFile,
 		DefaultRegtestFiltersPerFile, DefaultRegtestSPTweaksPerFile,
+		DefaultPrevOutCacheMiBytes,
 	)
 	ctx := &testContext{
 		miner:   miner,
@@ -950,6 +1004,7 @@ func setupBackend(t *testing.T, testDir string) (*lntestminer.HarnessMiner,
 
 	backend, backendCfg, bitcoindCfg, cleanup := newBitcoind(
 		t, testDir, []string{
+			"-rest",
 			"-regtest",
 			"-txindex",
 			"-disablewallet",

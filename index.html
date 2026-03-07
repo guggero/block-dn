@@ -242,6 +242,33 @@
                 </td>
             </tr>
             <tr>
+                <td><code>/block/&lt;hash&gt;</code></td>
+                <td>
+                    Returns the block with the given hash in its raw binary
+                    format or an error if the block cannot be found.
+                </td>
+                <td>
+                    <a href="https://block-dn.org/block/00000000000000000001976b2202ff92bee756134a875e8fa73703f4047ac9fa">
+                        block-dn.org/block/00000000000000000001976b2202ff92bee756134a875e8fa73703f4047ac9fa
+                    </a>
+                </td>
+            </tr>
+            <tr>
+                <td><code>/block/&lt;hash&gt;/spenttxouts?[format=json|hex|bin]</code></td>
+                <td>
+                    Returns the previous outputs of all transactions that were
+                    spent in the block with the given hash. The default response
+                    format is JSON but the format can be changed to binary or
+                    hex by adding a query parameter (e.g.
+                    <code>?format=bin</code> or  <code>?format=hex</code>).
+                </td>
+                <td>
+                    <a href="https://block-dn.org/block/00000000000000000001976b2202ff92bee756134a875e8fa73703f4047ac9fa/spenttxouts?format=json">
+                        block-dn.org/block/00000000000000000001976b2202ff92bee756134a875e8fa73703f4047ac9fa/spenttxouts?format=json
+                    </a>
+                </td>
+            </tr>
+            <tr>
                 <td><code>/tx/out-proof/&lt;txid&gt;</code></td>
                 <td>
                     Returns a binary merkle proof for the given transaction that
@@ -264,6 +291,21 @@
                 <td>
                     <a href="https://block-dn.org/tx/raw/8f900c6414c5c27231080f46168105e9fec20f9fb2f11b25ee0312d89bc022c0">
                         block-dn.org/tx/raw/8f900c6414c5c27231080f46168105e9fec20f9fb2f11b25ee0312d89bc022c0
+                    </a>
+                </td>
+            </tr>
+            <tr>
+                <td><code>/utxo/&lt;hash&gt;-&lt;vout&gt;/?[mempool=true][&format=json|hex|bin]</code></td>
+                <td>
+                    Returns the previous outputs of all transactions that were
+                    spent in the block with the given hash. The default response
+                    format is JSON but the format can be changed to binary or
+                    hex by adding a query parameter (e.g.
+                    <code>?format=bin</code> or  <code>?format=hex</code>).
+                </td>
+                <td>
+                    <a href="https://block-dn.org/utxo/0e3e2357e806b6cdb1f70b54c3a3a17b6714ee1f0e68bebb44a74b1efd512098-0/?mempool=true&format=json">
+                        block-dn.org/utxo/0e3e2357e806b6cdb1f70b54c3a3a17b6714ee1f0e68bebb44a74b1efd512098-0/?mempool=true&format=json
                     </a>
                 </td>
             </tr>
