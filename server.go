@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/gorilla/mux"
 	"github.com/lightningnetwork/lnd/fn/v2"
