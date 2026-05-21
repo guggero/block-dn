@@ -27,7 +27,12 @@ var (
 	Commit = ""
 
 	logMgr *build.SubLoggerManager
-	log    btclog.Logger
+
+	// log defaults to btclog.Disabled (a no-op logger) so that pure
+	// unit tests can exercise package code without first calling
+	// setupLogging. setupLogging replaces this with a real
+	// rotating-file logger when the binary actually runs.
+	log = btclog.Disabled
 )
 
 type mainCommand struct {
