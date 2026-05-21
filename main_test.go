@@ -769,14 +769,33 @@ func testSPTweakData(t *testing.T, ctx *testContext) {
 
 	// Now we mine some blocks with Taproot outputs to ensure we have
 	// Taproot tweaks in the SP tweak data.
+	//
+	// We use a comparatively large output value (100_000 sat instead
+	// of e.g. 5_000) on purpose. The miner's memWallet selects coins
+	// by iterating its UTXO map (Go map order is randomized) and stops
+	// at the first running total ≥ amount+fee — so the change is
+	// bounded above by the value of the last-added UTXO. By this point
+	// in TestBlockDN the regtest subsidy has halved 22 times (chain is
+	// past 22 × SubsidyReductionInterval=150), so the wallet's UTXO
+	// set is a mix of huge initial coinbases and many tiny post-halving
+	// coinbases (down to 1192 sat). If the last-added UTXO is a tiny
+	// one and the change happens to fall below the dust threshold, the
+	// broadcast fails with "payment is dust". Bumping the output value
+	// forces the wallet to either pick at least one large coinbase
+	// (yielding a huge change) or accumulate ~85 tiny ones (vanishingly
+	// unlikely under Go's map randomization), so dust change becomes
+	// effectively impossible. We deliberately don't use
+	// SendOutputsWithoutChange, which would roll the surplus into the
+	// fee and skew the fee estimator that testFeeEstimate samples
+	// after this loop.
 	numTrBlocks := uint32(20)
 	for range numTrBlocks {
 		ctx.miner.SendOutput(&wire.TxOut{
-			Value:    5_000,
+			Value:    100_000,
 			PkScript: psbt.SilentPaymentDummyP2TROutput,
 		}, 2)
 		ctx.miner.SendOutput(&wire.TxOut{
-			Value:    5_000,
+			Value:    100_000,
 			PkScript: psbt.SilentPaymentDummyP2TROutput,
 		}, 2)
 		ctx.miner.MineBlocksAndAssertNumTxes(1, 2)
