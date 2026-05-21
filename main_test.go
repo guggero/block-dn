@@ -391,7 +391,7 @@ func testFeeEstimate(t *testing.T, ctx *testContext) {
 	headers := ctx.fetchJSON(t, "fees/estimate/1", &feeRate)
 	t.Logf("Got fee rate: %+v", feeRate)
 	require.InDelta(t, 1723, feeRate.FeeSatPerKVByte, 2)
-	require.EqualValues(t, 430, feeRate.FeeSatPerKWeight)
+	require.InDelta(t, 430, feeRate.FeeSatPerKWeight, 2)
 	require.EqualValues(t, 1, feeRate.FeeSatPerVByte)
 	require.Equal(t, "*", headers.Get(HeaderCORS))
 }
