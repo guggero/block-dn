@@ -155,13 +155,34 @@
                     Bitcoin network identifier, 1 byte import format version,
                     1 byte header type, 4 byte start header height), followed by
                     the headers serialized as 80 bytes per header.<br />
-                    <code>end_block</code> must be divisible by 100'000 and is
-                    non-inclusive, meaning all blocks up to but not including
-                    the <code>end_block</code> are returned!
+                    <code>end_block</code> is non-inclusive (heights
+                    <code>0..end_block-1</code> are returned), so the maximum
+                    useful value is the server's current tip height plus one.
+                    When the requested range is fully covered by sealed files
+                    on disk, <code>end_block</code> must additionally be
+                    divisible by 100'000; otherwise the response is served
+                    partly from memory and any value &le; tip+1 is accepted.
                 </td>
                 <td>
                     <a href="https://block-dn.org/headers/import/200000">
                         block-dn.org/headers/import/200000
+                    </a>
+                </td>
+            </tr>
+            <tr>
+                <td><code>/headers/import/latest</code></td>
+                <td>
+                    Convenience shortcut for clients that want every header
+                    the server currently has without first looking up the tip
+                    height. Behaves exactly like
+                    <code>/headers/import/&lt;tip+1&gt;</code> — same binary
+                    format, same 10 byte metadata prefix — but the end height
+                    is resolved by the server. The response is always
+                    short-cached (memory tier) because the tip is mutable.
+                </td>
+                <td>
+                    <a href="https://block-dn.org/headers/import/latest">
+                        block-dn.org/headers/import/latest
                     </a>
                 </td>
             </tr>
@@ -188,13 +209,32 @@
                     version, 1 byte header type, 4 byte start header height),
                     followed by the filter header hashes serialized as 32 bytes
                     per header hash.<br />
-                    <code>end_block</code> must be divisible by 100'000 and is
-                    non-inclusive, meaning all blocks up to but not including
-                    the <code>end_block</code> are returned!
+                    The same <code>end_block</code> rules as
+                    <code>/headers/import</code> apply: non-inclusive, capped
+                    at tip+1, and required to be divisible by 100'000 only
+                    when the requested range is fully covered by sealed files
+                    on disk.
                 </td>
                 <td>
                     <a href="https://block-dn.org/filter-headers/import/200000">
                         block-dn.org/filter-headers/import/200000
+                    </a>
+                </td>
+            </tr>
+            <tr>
+                <td><code>/filter-headers/import/latest</code></td>
+                <td>
+                    Convenience shortcut for clients that want every filter
+                    header the server currently has without first looking up
+                    the tip height. Behaves exactly like
+                    <code>/filter-headers/import/&lt;tip+1&gt;</code> — same
+                    binary format, same 10 byte metadata prefix — but the end
+                    height is resolved by the server. The response is always
+                    short-cached (memory tier) because the tip is mutable.
+                </td>
+                <td>
+                    <a href="https://block-dn.org/filter-headers/import/latest">
+                        block-dn.org/filter-headers/import/latest
                     </a>
                 </td>
             </tr>

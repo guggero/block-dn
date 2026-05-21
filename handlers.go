@@ -120,12 +120,20 @@ func (s *server) createRouter() *mux.Router {
 	router.HandleFunc("/status", s.statusRequestHandler)
 	router.HandleFunc("/headers/{height:[0-9]+}", s.headersRequestHandler)
 	router.HandleFunc(
+		"/headers/import/latest",
+		s.headersImportLatestRequestHandler,
+	)
+	router.HandleFunc(
 		"/headers/import/{height:[0-9]+}",
 		s.headersImportRequestHandler,
 	)
 	router.HandleFunc(
 		"/filter-headers/{height:[0-9]+}",
 		s.filterHeadersRequestHandler,
+	)
+	router.HandleFunc(
+		"/filter-headers/import/latest",
+		s.filterHeadersImportLatestRequestHandler,
 	)
 	router.HandleFunc(
 		"/filter-headers/import/{height:[0-9]+}",
@@ -225,6 +233,21 @@ func (s *server) headersImportRequestHandler(w http.ResponseWriter,
 	)
 }
 
+// headersImportLatestRequestHandler serves /headers/import/latest, returning
+// every block header from height 0 up to and including the server's current
+// tip. This is the convenience shortcut for clients (test runners,
+// neutrino-style importers) that don't want to discover the current height
+// before requesting the import file. It always serves at the memory tier
+// since the tip is mutable.
+func (s *server) headersImportLatestRequestHandler(w http.ResponseWriter,
+	r *http.Request) {
+
+	s.heightBasedImportLatestHandler(
+		w, r, HeaderFileDir, HeaderFileNamePattern, s.headersPerFile,
+		s.headerFiles.serializeHeaders, typeBlockHeader,
+	)
+}
+
 func (s *server) filterHeadersRequestHandler(w http.ResponseWriter,
 	r *http.Request) {
 
@@ -239,6 +262,18 @@ func (s *server) filterHeadersImportRequestHandler(w http.ResponseWriter,
 	r *http.Request) {
 
 	s.heightBasedImportRequestHandler(
+		w, r, HeaderFileDir, FilterHeaderFileNamePattern,
+		s.headersPerFile, s.headerFiles.serializeFilterHeaders,
+		typeFilterHeader,
+	)
+}
+
+// filterHeadersImportLatestRequestHandler is the /filter-headers/import/latest
+// counterpart to headersImportLatestRequestHandler.
+func (s *server) filterHeadersImportLatestRequestHandler(w http.ResponseWriter,
+	r *http.Request) {
+
+	s.heightBasedImportLatestHandler(
 		w, r, HeaderFileDir, FilterHeaderFileNamePattern,
 		s.headersPerFile, s.headerFiles.serializeFilterHeaders,
 		typeFilterHeader,
@@ -379,14 +414,7 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 	serializeCb func(w io.Writer, startIndex, endIndex int32) error,
 	fileType byte) {
 
-	// These kinds of requests aren't available in light mode.
-	if s.lightMode {
-		sendError(w, status503, errUnavailableInLightMode)
-		return
-	}
-
-	if !s.headerFiles.startupComplete.Load() {
-		sendError(w, status503, errStillStartingUp)
+	if !s.checkImportPreconditions(w) {
 		return
 	}
 
@@ -401,6 +429,62 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 		sendError(w, status400, err)
 		return
 	}
+
+	s.serveHeightBasedImport(
+		w, subDir, fileNamePattern, entriesPerFile, serializeCb,
+		fileType, endHeight,
+	)
+}
+
+// heightBasedImportLatestHandler is the shared implementation for the
+// /headers/import/latest and /filter-headers/import/latest convenience
+// routes. It resolves endHeight to the server's current tip + 1 (because
+// endHeight is exclusive, so currentHeight+1 covers heights 0..currentHeight)
+// and delegates to the same serving logic as the numeric route.
+func (s *server) heightBasedImportLatestHandler(w http.ResponseWriter,
+	_ *http.Request, subDir, fileNamePattern string, entriesPerFile int32,
+	serializeCb func(w io.Writer, startIndex, endIndex int32) error,
+	fileType byte) {
+
+	if !s.checkImportPreconditions(w) {
+		return
+	}
+
+	endHeight := int64(s.headerFiles.currentHeight.Load()) + 1
+
+	s.serveHeightBasedImport(
+		w, subDir, fileNamePattern, entriesPerFile, serializeCb,
+		fileType, endHeight,
+	)
+}
+
+// checkImportPreconditions enforces the two gates shared by every import
+// endpoint (light mode and startup), writing the appropriate 503 error and
+// returning false if either fails. Callers should bail when this returns
+// false.
+func (s *server) checkImportPreconditions(w http.ResponseWriter) bool {
+	if s.lightMode {
+		sendError(w, status503, errUnavailableInLightMode)
+		return false
+	}
+
+	if !s.headerFiles.startupComplete.Load() {
+		sendError(w, status503, errStillStartingUp)
+		return false
+	}
+
+	return true
+}
+
+// serveHeightBasedImport writes the import metadata header and then streams
+// headers from 0..endHeight-1 to w, sourced from on-disk files where
+// available and from the in-memory tail otherwise. It assumes endHeight has
+// already been validated (e.g., by checkEndHeight) or is server-resolved
+// (e.g., from currentHeight+1 on the /latest route).
+func (s *server) serveHeightBasedImport(w http.ResponseWriter,
+	subDir, fileNamePattern string, entriesPerFile int32,
+	serializeCb func(w io.Writer, startIndex, endIndex int32) error,
+	fileType byte, endHeight int64) {
 
 	// We allow the end height to be equal to the current height, which
 	// we serve content from memory. In that case we mark the whole file as
@@ -427,7 +511,7 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 
 		// Make sure we'll be able to serve a full cache file.
 		if endHeight%int64(entriesPerFile) != 0 {
-			err = fmt.Errorf("invalid end height %d, must be a "+
+			err := fmt.Errorf("invalid end height %d, must be a "+
 				"multiple of %d", endHeight, entriesPerFile)
 			sendError(w, status400, err)
 			return
@@ -498,7 +582,7 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 	// (matches the file path's behavior of stopping the loop when
 	// lastHeight == endHeight without writing one more entry), so the
 	// inclusive last index here is endHeight - 1.
-	err = serializeCb(w, int32(lastHeight), int32(endHeight)-1)
+	err := serializeCb(w, int32(lastHeight), int32(endHeight)-1)
 	if err != nil {
 		log.Errorf("Error serializing: %v", err)
 	}
@@ -739,7 +823,13 @@ func (s *server) checkStartHeight(processor blockProcessor, height int64,
 func (s *server) checkEndHeight(processor blockProcessor, height int64,
 	entriesPerFile int32) error {
 
-	if int32(height) > processor.getCurrentHeight() {
+	// endHeight is exclusive, so the maximum valid value is
+	// currentHeight + 1 — that yields a response containing every header
+	// up to and including the current tip. Rejecting at strictly greater
+	// than currentHeight would make the tip block unreachable through the
+	// numeric import URL (the convenience /latest route already uses
+	// currentHeight + 1 internally).
+	if int32(height) > processor.getCurrentHeight()+1 {
 		return fmt.Errorf("end height %d is greater than current "+
 			"height %d", height, processor.getCurrentHeight())
 	}

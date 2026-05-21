@@ -213,12 +213,20 @@ var testCases = []struct {
 		fn:   testHeadersImport,
 	},
 	{
+		name: "headers-import-latest",
+		fn:   testHeadersImportLatest,
+	},
+	{
 		name: "filter-headers",
 		fn:   testFilterHeaders,
 	},
 	{
 		name: "filter-headers-import",
 		fn:   testFilterHeadersImport,
+	},
+	{
+		name: "filter-headers-import-latest",
+		fn:   testFilterHeadersImportLatest,
 	},
 	{
 		name: "sp-tweak-data",
@@ -253,9 +261,18 @@ func testErrors(t *testing.T, ctx *testContext) {
 	}
 
 	var (
-		badHash       = strings.Repeat("k", 64)
-		badInt64      = strings.Repeat("9", 20)
-		badHeight     = strconv.Itoa(int(totalInitialBlocks + 1))
+		badHash  = strings.Repeat("k", 64)
+		badInt64 = strings.Repeat("9", 20)
+
+		// badStartHeight is too high for the start-height endpoints
+		// (checkStartHeight rejects > currentHeight).
+		badStartHeight = strconv.Itoa(int(totalInitialBlocks + 1))
+
+		// badEndHeight is too high for the end-height (import)
+		// endpoints. checkEndHeight allows endHeight up to
+		// currentHeight + 1 (inclusive of the tip block since
+		// endHeight is exclusive), so we go one higher.
+		badEndHeight  = strconv.Itoa(int(totalInitialBlocks + 2))
 		respBadHeight = errorResponse{
 			status: 400,
 			error:  "invalid value for parameter height",
@@ -269,7 +286,7 @@ func testErrors(t *testing.T, ctx *testContext) {
 		respBadStartHeightLarge = errorResponse{
 			status: 400,
 			error: fmt.Sprintf("start height %s is greater than "+
-				"current height %d", badHeight,
+				"current height %d", badStartHeight,
 				totalInitialBlocks),
 		}
 		respBadEndHeight0 = errorResponse{
@@ -287,7 +304,7 @@ func testErrors(t *testing.T, ctx *testContext) {
 		respBadEndHeightLarge = errorResponse{
 			status: 400,
 			error: fmt.Sprintf("end height %s is greater than "+
-				"current height %d", badHeight,
+				"current height %d", badEndHeight,
 				totalInitialBlocks),
 		}
 		respBadHashLength = errorResponse{
@@ -300,38 +317,38 @@ func testErrors(t *testing.T, ctx *testContext) {
 		}
 	)
 	errorCases := map[string]errorResponse{
-		"foo":                                respNotFound,
-		"headers":                            respNotFound,
-		"headers/" + badInt64:                respBadHeight,
-		"headers/1":                          respBadStartHeight1,
-		"headers/" + badHeight:               respBadStartHeightLarge,
-		"headers/import":                     respNotFound,
-		"headers/import/" + badInt64:         respBadHeight,
-		"headers/import/0":                   respBadEndHeight0,
-		"headers/import/1000":                respBadEndHeightPartial,
-		"headers/import/" + badHeight:        respBadEndHeightLarge,
-		"filter-headers":                     respNotFound,
-		"filter-headers/" + badInt64:         respBadHeight,
-		"filter-headers/1":                   respBadStartHeight1,
-		"filter-headers/" + badHeight:        respBadStartHeightLarge,
-		"filter-headers/import":              respNotFound,
-		"filter-headers/import/" + badInt64:  respBadHeight,
-		"filter-headers/import/0":            respBadEndHeight0,
-		"filter-headers/import/1000":         respBadEndHeightPartial,
-		"filter-headers/import/" + badHeight: respBadEndHeightLarge,
-		"filters":                            respNotFound,
-		"filters/" + badInt64:                respBadHeight,
-		"filters/1":                          respBadStartHeight1,
-		"filters/" + badHeight:               respBadStartHeightLarge,
-		"block":                              respNotFound,
-		"block/aaaa":                         respBadHashLength,
-		"block/" + badHash:                   respNotFound,
-		"tx/out-proof":                       respNotFound,
-		"tx/out-proof/aaaa":                  respBadHashLength,
-		"tx/out-proof/" + badHash:            respNotFound,
-		"tx/raw":                             respNotFound,
-		"tx/raw/aaaa":                        respBadHashLength,
-		"tx/raw/" + badHash:                  respNotFound,
+		"foo":                                   respNotFound,
+		"headers":                               respNotFound,
+		"headers/" + badInt64:                   respBadHeight,
+		"headers/1":                             respBadStartHeight1,
+		"headers/" + badStartHeight:             respBadStartHeightLarge,
+		"headers/import":                        respNotFound,
+		"headers/import/" + badInt64:            respBadHeight,
+		"headers/import/0":                      respBadEndHeight0,
+		"headers/import/1000":                   respBadEndHeightPartial,
+		"headers/import/" + badEndHeight:        respBadEndHeightLarge,
+		"filter-headers":                        respNotFound,
+		"filter-headers/" + badInt64:            respBadHeight,
+		"filter-headers/1":                      respBadStartHeight1,
+		"filter-headers/" + badStartHeight:      respBadStartHeightLarge,
+		"filter-headers/import":                 respNotFound,
+		"filter-headers/import/" + badInt64:     respBadHeight,
+		"filter-headers/import/0":               respBadEndHeight0,
+		"filter-headers/import/1000":            respBadEndHeightPartial,
+		"filter-headers/import/" + badEndHeight: respBadEndHeightLarge,
+		"filters":                               respNotFound,
+		"filters/" + badInt64:                   respBadHeight,
+		"filters/1":                             respBadStartHeight1,
+		"filters/" + badStartHeight:             respBadStartHeightLarge,
+		"block":                                 respNotFound,
+		"block/aaaa":                            respBadHashLength,
+		"block/" + badHash:                      respNotFound,
+		"tx/out-proof":                          respNotFound,
+		"tx/out-proof/aaaa":                     respBadHashLength,
+		"tx/out-proof/" + badHash:               respNotFound,
+		"tx/raw":                                respNotFound,
+		"tx/raw/aaaa":                           respBadHashLength,
+		"tx/raw/" + badHash:                     respNotFound,
 	}
 	for endpoint, expected := range errorCases {
 		body, headers, status := ctx.fetchBinaryWithStatus(t, endpoint)
@@ -630,6 +647,95 @@ func testFilterHeadersImport(t *testing.T, ctx *testContext) {
 			"filter header at height %d does not match", height,
 		)
 	}
+}
+
+// testHeadersImportLatest exercises the convenience shortcut
+// /headers/import/latest, which auto-resolves endHeight to currentHeight+1.
+// The response must be byte-equivalent to a request for the numeric URL
+// /headers/import/<currentHeight+1> and must be served at the memory tier
+// (the tip is mutable).
+func testHeadersImportLatest(t *testing.T, ctx *testContext) {
+	tipHeight := ctx.server.headerFiles.getCurrentHeight()
+	require.Equal(t, int32(totalInitialBlocks), tipHeight)
+
+	body, headers := ctx.fetchBinary(t, "headers/import/latest")
+
+	// The response covers heights 0..tipHeight, which is tipHeight+1
+	// entries.
+	expectedHeaders := int(tipHeight) + 1
+	targetLen := importMetadataSize + expectedHeaders*headerSize
+	require.Lenf(t, body, targetLen, "body length should be %d but is %d",
+		targetLen, len(body))
+
+	// The tip is mutable, so the response must be memory-tier (a deeper
+	// reorg could change the bytes), and never disk-tier with a long TTL.
+	require.Contains(t, headers, HeaderCache)
+	require.Equal(t, cacheMemory, headers.Get(HeaderCache))
+	require.Equal(t, "*", headers.Get(HeaderCORS))
+
+	// Byte-equivalence: hitting the numeric URL for the same end height
+	// must yield an identical body. This guards against the two routes
+	// diverging (e.g., one applying alignment checks while the other
+	// doesn't).
+	numericBody, _ := ctx.fetchBinary(t,
+		fmt.Sprintf("headers/import/%d", tipHeight+1))
+	require.Equal(t, numericBody, body, "latest body must be identical "+
+		"to numeric body for the same end height")
+
+	// Spot-check the last header in the body matches what bitcoind
+	// reports for tipHeight (the last height included since endHeight is
+	// exclusive at tipHeight+1).
+	lastHeaderStart := importMetadataSize + int(tipHeight)*headerSize
+	lastHeaderEnd := lastHeaderStart + headerSize
+	headerBytes := body[lastHeaderStart:lastHeaderEnd]
+
+	blockHash, err := ctx.backend.GetBlockHash(int64(tipHeight))
+	require.NoError(t, err)
+
+	block, err := ctx.backend.GetBlock(blockHash)
+	require.NoError(t, err)
+
+	var headerBuf bytes.Buffer
+	require.NoError(t, block.Header.Serialize(&headerBuf))
+	require.Equal(t, headerBuf.Bytes(), headerBytes,
+		"last header in latest response must match bitcoind")
+}
+
+// testFilterHeadersImportLatest is the /filter-headers/import/latest
+// counterpart to testHeadersImportLatest.
+func testFilterHeadersImportLatest(t *testing.T, ctx *testContext) {
+	tipHeight := ctx.server.headerFiles.getCurrentHeight()
+	require.Equal(t, int32(totalInitialBlocks), tipHeight)
+
+	body, headers := ctx.fetchBinary(t, "filter-headers/import/latest")
+
+	expectedEntries := int(tipHeight) + 1
+	targetLen := importMetadataSize + expectedEntries*filterHeadersSize
+	require.Lenf(t, body, targetLen, "body length should be %d but is %d",
+		targetLen, len(body))
+
+	require.Contains(t, headers, HeaderCache)
+	require.Equal(t, cacheMemory, headers.Get(HeaderCache))
+	require.Equal(t, "*", headers.Get(HeaderCORS))
+
+	numericBody, _ := ctx.fetchBinary(t,
+		fmt.Sprintf("filter-headers/import/%d", tipHeight+1))
+	require.Equal(t, numericBody, body, "latest body must be identical "+
+		"to numeric body for the same end height")
+
+	// Spot-check the last filter header.
+	lastStart := importMetadataSize + int(tipHeight)*filterHeadersSize
+	lastEnd := lastStart + filterHeadersSize
+	filterBytes := body[lastStart:lastEnd]
+
+	blockHash, err := ctx.backend.GetBlockHash(int64(tipHeight))
+	require.NoError(t, err)
+	filter, err := ctx.backend.GetBlockFilter(*blockHash, &filterBasic)
+	require.NoError(t, err)
+	filterHeaderHash, err := chainhash.NewHashFromStr(filter.Header)
+	require.NoError(t, err)
+	require.Equal(t, filterHeaderHash[:], filterBytes,
+		"last filter header in latest response must match bitcoind")
 }
 
 func testSPTweakData(t *testing.T, ctx *testContext) {

@@ -20,9 +20,10 @@ var (
 
 // init is called when the package is initialized, before any tests run.
 //
-//nolint:gochecknoinits // Test-only logger setup; can't easily use
 // TestMain here because main_test.go has its own setup that doesn't
 // route through TestMain.
+//
+//nolint:gochecknoinits // Test-only logger setup; can't easily use
 func init() {
 	// Set up logging once for all tests.
 	logger := btclog.NewBackend(os.Stdout)
@@ -50,8 +51,8 @@ func TestNeutrinoSync(t *testing.T) {
 	// network sync. No peers specified – we want to test the import
 	// functionality by itself.
 	instance := "https://signet.block-dn.org/"
-	blockHeadersSource := instance + "headers/import/200000"
-	filterHeadersSource := instance + "filter-headers/import/200000"
+	blockHeadersSource := instance + "headers/import/latest"
+	filterHeadersSource := instance + "filter-headers/import/latest"
 	importConfig := neutrino.Config{
 		DataDir:     tempDir,
 		Database:    db,
