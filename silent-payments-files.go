@@ -16,9 +16,9 @@ import (
 
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcec/v2"
-	sp "github.com/btcsuite/btcd/btcutil/silentpayments"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/rpcclient"
+	sp "github.com/btcsuite/btcd/silentpayments"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightninglabs/neutrino/cache/lru"

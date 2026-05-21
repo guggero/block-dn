@@ -17,10 +17,10 @@ import (
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/psbt"
-	sp "github.com/btcsuite/btcd/btcutil/silentpayments"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/rpcclient"
+	sp "github.com/btcsuite/btcd/silentpayments"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcwallet/chain"
 	lntestminer "github.com/lightningnetwork/lnd/lntest/miner"
@@ -161,11 +161,7 @@ func (ctx *testContext) waitBackendSync(t *testing.T) {
 func (ctx *testContext) waitFilesSync(t *testing.T) {
 	err := wait.NoError(func() error {
 		headerHeight := ctx.server.headerFiles.getCurrentHeight()
-		_, minerHeight, err := ctx.miner.Client.GetBestBlock()
-		if err != nil {
-			return fmt.Errorf("unable to get miner height: %w", err)
-		}
-
+		_, minerHeight := ctx.miner.GetBestBlock()
 		if minerHeight != headerHeight {
 			return fmt.Errorf("expected height %d, got %d",
 				minerHeight, headerHeight)
@@ -993,7 +989,7 @@ func setupBackend(t *testing.T, testDir string) (*lntestminer.HarnessMiner,
 	miner := lntestminer.NewTempMiner(
 		ctx, t, filepath.Join(testDir, "temp-miner"), "miner.log",
 	)
-	require.NoError(t, miner.SetUp(true, numStartupBlocks))
+	require.NoError(t, miner.Start(true, numStartupBlocks))
 
 	// Next mine enough blocks in order for segwit and the CSV package
 	// soft-fork to activate on SimNet.
@@ -1039,11 +1035,7 @@ func waitBackendSync(t *testing.T, backend *rpcclient.Client,
 
 		backendHeight := int32(backendCount)
 
-		_, minerHeight, err := miner.Client.GetBestBlock()
-		if err != nil {
-			return fmt.Errorf("unable to get miner height: %w", err)
-		}
-
+		_, minerHeight := miner.GetBestBlock()
 		if backendHeight > syncState+1000 {
 			t.Logf("Backend height: %d, Miner height: %d",
 				backendHeight, minerHeight)
