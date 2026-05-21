@@ -87,12 +87,12 @@ func (s *server) start() error {
 	s.h2hCache = newH2HCache(client)
 
 	s.headerFiles = newHeaderFiles(
-		s.headersPerFile, s.chain, s.quit, s.baseDir,
-		s.chainParams, s.h2hCache,
+		s.headersPerFile, int32(s.reOrgSafeDepth), s.chain, s.quit,
+		s.baseDir, s.chainParams, s.h2hCache,
 	)
 	s.cFilterFiles = newCFilterFiles(
-		s.filtersPerFile, s.chain, s.quit, s.baseDir,
-		s.chainParams, s.h2hCache,
+		s.filtersPerFile, int32(s.reOrgSafeDepth), s.chain, s.quit,
+		s.baseDir, s.chainParams, s.h2hCache,
 	)
 
 	// We preload all the headers into the height to hash cache on startup.
@@ -198,8 +198,8 @@ func (s *server) start() error {
 	}
 
 	s.spTweakFiles = newSPTweakFiles(
-		s.spTweaksPerFile, s.chain, s.quit, s.baseDir, s.chainParams,
-		s.h2hCache, s.spTweakCacheSizeMiB,
+		s.spTweaksPerFile, int32(s.reOrgSafeDepth), s.chain, s.quit,
+		s.baseDir, s.chainParams, s.h2hCache, s.spTweakCacheSizeMiB,
 	)
 
 	s.wg.Add(1)

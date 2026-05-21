@@ -9,9 +9,6 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
-	"sync"
-	"sync/atomic"
-	"time"
 
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/chaincfg"
@@ -55,180 +52,97 @@ var (
 )
 
 type cFilterFiles struct {
-	sync.RWMutex
+	producerBase
 
-	quit <-chan struct{}
+	filters map[int32][]byte
 
-	h2hCache *heightToHashCache
-
-	filtersPerFile int32
-	baseDir        string
-	chain          *rpcclient.Client
-	chainParams    *chaincfg.Params
-
-	startupComplete atomic.Bool
-	currentHeight   atomic.Int32
-
-	filters map[chainhash.Hash][]byte
+	// heightToHash backs cachedHash; cFilterFiles doesn't otherwise
+	// store the block hash per height (the filter bytes don't contain
+	// it), so we record it explicitly during ingest so reorg detection
+	// can survive a concurrent h2hCache invalidation from another
+	// producer.
+	heightToHash map[int32]chainhash.Hash
 }
 
-func newCFilterFiles(filtersPerFile int32, chain *rpcclient.Client,
-	quit <-chan struct{}, baseDir string, chainParams *chaincfg.Params,
+func newCFilterFiles(filtersPerFile, reOrgSafeDepth int32,
+	chain *rpcclient.Client, quit <-chan struct{}, baseDir string,
+	chainParams *chaincfg.Params,
 	h2hCache *heightToHashCache) *cFilterFiles {
 
 	cf := &cFilterFiles{
-		quit:           quit,
-		h2hCache:       h2hCache,
-		filtersPerFile: filtersPerFile,
-		baseDir:        baseDir,
-		chain:          chain,
-		chainParams:    chainParams,
+		filters:      make(map[int32][]byte),
+		heightToHash: make(map[int32]chainhash.Hash),
 	}
-	cf.clearData()
+	cf.producerBase = producerBase{
+		quit:           quit,
+		chain:          chain,
+		h2hCache:       h2hCache,
+		chainParams:    chainParams,
+		name:           "filter",
+		baseDir:        baseDir,
+		subDir:         FilterFileDir,
+		fileSuffix:     FilterFileSuffix,
+		extractRegex:   filterFileNameExtractRegex,
+		entriesPerFile: filtersPerFile,
+		reOrgSafeDepth: reOrgSafeDepth,
+		hooks: producerHooks{
+			ingest:          cf.ingest,
+			writeSealedFile: cf.writeSealedFile,
+			pruneLocked:     cf.pruneLocked,
+			cachedHash:      cf.cachedHash,
+		},
+	}
+	cf.lastSealedHeight.Store(-1)
 
 	return cf
 }
 
-func (c *cFilterFiles) isStartupComplete() bool {
-	return c.startupComplete.Load()
-}
+func (c *cFilterFiles) ingest(height int32) error {
+	hash, err := c.h2hCache.getBlockHash(height)
+	if err != nil {
+		return fmt.Errorf("error getting block hash for height %d: %w",
+			height, err)
+	}
 
-func (c *cFilterFiles) getCurrentHeight() int32 {
-	return c.currentHeight.Load()
-}
+	filter, err := c.chain.GetBlockFilter(*hash, &filterBasic)
+	if err != nil {
+		return fmt.Errorf("error getting block filter for hash %s: %w",
+			hash, err)
+	}
+	filterBytes, err := hex.DecodeString(filter.Filter)
+	if err != nil {
+		return fmt.Errorf("error parsing filter bytes for hash %s: %w",
+			hash, err)
+	}
 
-func (c *cFilterFiles) clearData() {
 	c.Lock()
-	defer c.Unlock()
-
-	c.filters = make(map[chainhash.Hash][]byte, c.filtersPerFile)
-}
-
-// updateFiles updates the header and filter files on disk.
-//
-// NOTE: Must be called as a goroutine.
-func (c *cFilterFiles) updateFiles(numBlocks int32) error {
-	log.Debugf("Updating filter files in %s for network %s", c.baseDir,
-		c.chainParams.Name)
-
-	filterDir := filepath.Join(c.baseDir, FilterFileDir)
-	err := os.MkdirAll(filterDir, DirectoryMode)
-	if err != nil {
-		return fmt.Errorf("error creating directory %s: %w", filterDir,
-			err)
-	}
-
-	lastBlock, err := lastFile(
-		filterDir, FilterFileSuffix, filterFileNameExtractRegex,
-	)
-	if err != nil {
-		return fmt.Errorf("error getting last filter file: %w", err)
-	}
-
-	// If we already had some blocks written, then we need to start from
-	// the next block.
-	startBlock := lastBlock
-	if lastBlock > 0 {
-		startBlock++
-	}
-
-	log.Debugf("Writing filter files from block %d to block %d", startBlock,
-		numBlocks)
-	err = c.updateCacheAndFiles(startBlock, numBlocks)
-	if err != nil {
-		return fmt.Errorf("error updating blocks: %w", err)
-	}
-
-	// Allow serving requests now that we're caught up.
-	c.startupComplete.Store(true)
-
-	// Let's now go into the infinite loop of updating the filter files
-	// whenever a new block is mined.
-	log.Debugf("Caught up filters to best block %d, starting to poll for "+
-		"new blocks", numBlocks)
-	for {
-		select {
-		case <-time.After(blockPollInterval):
-		case <-c.quit:
-			return errServerShutdown
-		}
-
-		height, err := c.chain.GetBlockCount()
-		if err != nil {
-			return fmt.Errorf("error getting best block: %w", err)
-		}
-
-		currentBlock := c.currentHeight.Load()
-		if int32(height) == currentBlock {
-			continue
-		}
-
-		log.Infof("Processing filters for new block mined at height %d",
-			height)
-		err = c.updateCacheAndFiles(currentBlock+1, int32(height))
-		if err != nil {
-			return fmt.Errorf("error updating filters for blocks: "+
-				"%w", err)
-		}
-	}
-}
-
-func (c *cFilterFiles) updateCacheAndFiles(startBlock, endBlock int32) error {
-	filterDir := filepath.Join(c.baseDir, FilterFileDir)
-
-	for i := startBlock; i <= endBlock; i++ {
-		// Were we interrupted?
-		select {
-		case <-c.quit:
-			return errServerShutdown
-		default:
-		}
-
-		hash, err := c.h2hCache.getBlockHash(i)
-		if err != nil {
-			return fmt.Errorf("error getting block hash for "+
-				"height %d: %w", i, err)
-		}
-
-		filter, err := c.chain.GetBlockFilter(*hash, &filterBasic)
-		if err != nil {
-			return fmt.Errorf("error getting block filter for "+
-				"hash %s: %w", hash, err)
-		}
-		filterBytes, err := hex.DecodeString(filter.Filter)
-		if err != nil {
-			return fmt.Errorf("error parsing filter bytes for "+
-				"hash %s: %w", hash, err)
-		}
-
-		c.Lock()
-		c.filters[*hash] = filterBytes
-		c.Unlock()
-
-		if (i+1)%c.filtersPerFile == 0 {
-			fileStart := i - c.filtersPerFile + 1
-			filterFileName := fmt.Sprintf(
-				FilterFileNamePattern, filterDir, fileStart, i,
-			)
-
-			log.Debugf("Reached filter height %d, writing file "+
-				"starting at %d, containing %d items to %s", i,
-				fileStart, c.filtersPerFile, filterFileName)
-
-			err = c.writeFilters(filterFileName, fileStart, i)
-			if err != nil {
-				return fmt.Errorf("error writing filters: %w",
-					err)
-			}
-
-			// We don't need the filters anymore, so clear them out.
-			c.clearData()
-		}
-
-		c.currentHeight.Store(i)
-	}
+	c.filters[height] = filterBytes
+	c.heightToHash[height] = *hash
+	c.Unlock()
 
 	return nil
+}
+
+func (c *cFilterFiles) writeSealedFile(fileStart, fileEnd int32) error {
+	filterDir := filepath.Join(c.baseDir, c.subDir)
+	filterFileName := fmt.Sprintf(FilterFileNamePattern, filterDir,
+		fileStart, fileEnd)
+	return c.writeFilters(filterFileName, fileStart, fileEnd)
+}
+
+func (c *cFilterFiles) pruneLocked(start, end int32) {
+	for j := start; j <= end; j++ {
+		delete(c.filters, j)
+		delete(c.heightToHash, j)
+	}
+}
+
+func (c *cFilterFiles) cachedHash(height int32) (chainhash.Hash, bool) {
+	c.RLock()
+	defer c.RUnlock()
+
+	hash, ok := c.heightToHash[height]
+	return hash, ok
 }
 
 func (c *cFilterFiles) writeFilters(fileName string, startIndex,
@@ -243,8 +157,9 @@ func (c *cFilterFiles) writeFilters(fileName string, startIndex,
 		return fmt.Errorf("error creating file %s: %w", fileName, err)
 	}
 
-	err = c.serializeFilters(file, startIndex, endIndex)
+	err = c.serializeFiltersLocked(file, startIndex, endIndex)
 	if err != nil {
+		_ = file.Close()
 		return fmt.Errorf("error writing filters to file %s: %w",
 			fileName, err)
 	}
@@ -260,19 +175,22 @@ func (c *cFilterFiles) writeFilters(fileName string, startIndex,
 func (c *cFilterFiles) serializeFilters(w io.Writer, startIndex,
 	endIndex int32) error {
 
+	c.RLock()
+	defer c.RUnlock()
+
+	return c.serializeFiltersLocked(w, startIndex, endIndex)
+}
+
+func (c *cFilterFiles) serializeFiltersLocked(w io.Writer, startIndex,
+	endIndex int32) error {
+
 	for j := startIndex; j <= endIndex; j++ {
-		hash, err := c.h2hCache.getBlockHash(j)
-		if err != nil {
-			return fmt.Errorf("invalid height %d", j)
-		}
-
-		filter, ok := c.filters[*hash]
+		filter, ok := c.filters[j]
 		if !ok {
-			return fmt.Errorf("missing filter for hash %s (height "+
-				"%d)", hash.String(), j)
+			return fmt.Errorf("missing filter at height %d", j)
 		}
 
-		err = wire.WriteVarBytes(w, 0, filter)
+		err := wire.WriteVarBytes(w, 0, filter)
 		if err != nil {
 			return fmt.Errorf("error writing filters: %w", err)
 		}

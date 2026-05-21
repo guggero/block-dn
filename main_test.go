@@ -46,7 +46,8 @@ const (
 
 	cacheTemporary = "public, max-age=1"
 	cacheMemory    = "public, max-age=60"
-	cacheDisk      = "public, max-age=31536000, immutable"
+	cacheDisk      = "public, max-age=31536000, " +
+		"stale-while-revalidate=86400"
 
 	unitTestDir = ".unit-test-logs"
 )
@@ -408,7 +409,8 @@ func testStatus(t *testing.T, ctx *testContext) {
 	require.Equal(t, height, status.BestSPTweakHeight)
 	require.Equal(t, blockHash.String(), status.BestBlockHash)
 
-	filterHeader := ctx.server.headerFiles.filterHeaders[blockHash]
+	filterHeader, ok := ctx.server.headerFiles.filterHeaderAtHeight(height)
+	require.True(t, ok)
 	require.Equal(t, filterHeader.String(), status.BestFilterHeader)
 }
 
@@ -479,11 +481,13 @@ func testHeadersImport(t *testing.T, ctx *testContext) {
 	require.Equal(t, "*", headers.Get(HeaderCORS))
 
 	// And now we try to fetch all headers up to the current height, which
-	// will require some of them to be served from memory.
+	// will require some of them to be served from memory. endHeight is
+	// exclusive on both paths, so /headers/import/N yields N headers
+	// (heights 0..N-1).
 	body, headers = ctx.fetchBinary(
 		t, fmt.Sprintf("headers/import/%d", totalInitialBlocks),
 	)
-	targetLen = importMetadataSize + int(totalInitialBlocks+1)*headerSize
+	targetLen = importMetadataSize + int(totalInitialBlocks)*headerSize
 	require.Lenf(t, body, targetLen, "body length should be %d but is %d",
 		targetLen, len(body))
 
@@ -491,10 +495,12 @@ func testHeadersImport(t *testing.T, ctx *testContext) {
 	require.Equal(t, cacheMemory, headers.Get(HeaderCache))
 	require.Equal(t, "*", headers.Get(HeaderCORS))
 
-	// We make sure that the last 10 entries are actually correct.
+	// We make sure the last 10 entries in the response (heights
+	// lastHeight-10..lastHeight-1, since endHeight is exclusive) are
+	// correct.
 	lastHeight := ctx.server.headerFiles.getCurrentHeight()
 	require.Equal(t, int32(totalInitialBlocks), lastHeight)
-	for height := lastHeight - 9; height <= lastHeight; height++ {
+	for height := lastHeight - 10; height < lastHeight; height++ {
 		start := importMetadataSize + int(height)*headerSize
 		end := importMetadataSize + int(height+1)*headerSize
 		headerBytes := body[start:end]
@@ -584,12 +590,14 @@ func testFilterHeadersImport(t *testing.T, ctx *testContext) {
 	require.Equal(t, "*", headers.Get(HeaderCORS))
 
 	// And now we try to fetch all headers up to the current height, which
-	// will require some of them to be served from memory.
+	// will require some of them to be served from memory. endHeight is
+	// exclusive on both paths, so /filter-headers/import/N yields N
+	// entries (heights 0..N-1).
 	body, headers = ctx.fetchBinary(
 		t, fmt.Sprintf("filter-headers/import/%d", totalInitialBlocks),
 	)
 	targetLen = importMetadataSize +
-		int(totalInitialBlocks+1)*filterHeadersSize
+		int(totalInitialBlocks)*filterHeadersSize
 	require.Lenf(t, body, targetLen, "body length should be %d but is %d",
 		targetLen, len(body))
 
@@ -597,10 +605,11 @@ func testFilterHeadersImport(t *testing.T, ctx *testContext) {
 	require.Equal(t, cacheMemory, headers.Get(HeaderCache))
 	require.Equal(t, "*", headers.Get(HeaderCORS))
 
-	// We make sure that the last 10 entries are actually correct.
+	// Verify the last 10 entries (heights lastHeight-10..lastHeight-1
+	// since endHeight is exclusive) match what bitcoind returns.
 	lastHeight := ctx.server.headerFiles.getCurrentHeight()
 	require.Equal(t, int32(totalInitialBlocks), lastHeight)
-	for height := lastHeight - 9; height <= lastHeight; height++ {
+	for height := lastHeight - 10; height < lastHeight; height++ {
 		start := importMetadataSize + int(height)*filterHeadersSize
 		end := importMetadataSize + int(height+1)*filterHeadersSize
 		headerBytes := body[start:end]

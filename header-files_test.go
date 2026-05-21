@@ -15,6 +15,14 @@ const (
 	headersPerFile = 100
 	initialBlocks  = 450
 
+	// testReOrgSafeDepth is small enough that all expected file
+	// boundaries within initialBlocks/finalBlocks are reached + buried by
+	// the time the test asserts file presence. With this depth the file
+	// covering [400..499] is sealed once tip ≥ 505, which finalBlocks=550
+	// satisfies, but the file covering [500..599] stays unsealed (need
+	// tip ≥ 605) — matching the existing expected counts.
+	testReOrgSafeDepth = 6
+
 	headerFileSize int64 = headersPerFile * headerSize
 	filterFileSize int64 = headersPerFile * filterHeadersSize
 )
@@ -33,7 +41,8 @@ func TestHeaderFilesUpdate(t *testing.T) {
 	quit := make(chan struct{})
 	h2hCache := newH2HCache(backend)
 	hf := newHeaderFiles(
-		headersPerFile, backend, quit, dataDir, &testParams, h2hCache,
+		headersPerFile, testReOrgSafeDepth, backend, quit, dataDir,
+		&testParams, h2hCache,
 	)
 
 	var wg sync.WaitGroup
@@ -66,7 +75,8 @@ func TestHeaderFilesUpdate(t *testing.T) {
 
 	quit = make(chan struct{})
 	hf = newHeaderFiles(
-		headersPerFile, backend, quit, dataDir, &testParams, h2hCache,
+		headersPerFile, testReOrgSafeDepth, backend, quit, dataDir,
+		&testParams, h2hCache,
 	)
 
 	// Wait for the final blocks to be written.
@@ -95,14 +105,12 @@ func waitForTargetHeight(t *testing.T, wg *sync.WaitGroup, hf fileWriter,
 
 	t.Helper()
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		err := hf.updateFiles(targetHeight)
 
 		// nolint:testifylint
 		require.ErrorIs(t, err, errServerShutdown)
-	}()
+	})
 
 	// Wait for sync.
 	err := wait.NoError(func() error {

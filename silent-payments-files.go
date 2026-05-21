@@ -10,13 +10,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/rpcclient"
 	sp "github.com/btcsuite/btcd/silentpayments"
 	"github.com/btcsuite/btcd/txscript"
@@ -192,202 +191,148 @@ func (p *prevOutCache) RemoveInputs(tx *wire.MsgTx) {
 }
 
 type spTweakFiles struct {
-	sync.RWMutex
-
-	quit <-chan struct{}
-
-	blocksPerFile int32
-	baseDir       string
-	chain         *rpcclient.Client
-	chainParams   *chaincfg.Params
-	h2hCache      *heightToHashCache
-
-	startupComplete atomic.Bool
-	currentHeight   atomic.Int32
+	producerBase
 
 	tweakData map[int32]map[int32]*btcec.PublicKey
 
+	// heightToHash mirrors cFilterFiles: see the comment there. SP
+	// tweak entries are keyed by height and don't carry a block hash,
+	// so we record it explicitly during ingest.
+	heightToHash map[int32]chainhash.Hash
+
 	prevOutCache *prevOutCache
+
+	// taprootStartHeight is the activation height for the current
+	// network, or a sentinel when Taproot isn't supported. Set once at
+	// construction so per-block ingest doesn't have to re-look it up.
+	taprootStartHeight int32
+	taprootSupported   bool
 }
 
-func newSPTweakFiles(itemsPerFile int32, chain *rpcclient.Client,
-	quit <-chan struct{}, baseDir string, chainParams *chaincfg.Params,
-	h2hCache *heightToHashCache, prevOutCacheSizeMiB uint16) *spTweakFiles {
+func newSPTweakFiles(itemsPerFile, reOrgSafeDepth int32,
+	chain *rpcclient.Client, quit <-chan struct{}, baseDir string,
+	chainParams *chaincfg.Params, h2hCache *heightToHashCache,
+	prevOutCacheSizeMiB uint16) *spTweakFiles {
 
-	c := &spTweakFiles{
-		quit:          quit,
-		blocksPerFile: itemsPerFile,
-		baseDir:       baseDir,
-		chain:         chain,
-		chainParams:   chainParams,
-		h2hCache:      h2hCache,
-		prevOutCache:  newPrevOutCache(chain, prevOutCacheSizeMiB),
+	taprootStartHeight, taprootSupported := TaprootActivationHeights[chainParams.Net]
+
+	s := &spTweakFiles{
+		tweakData:          make(map[int32]map[int32]*btcec.PublicKey),
+		heightToHash:       make(map[int32]chainhash.Hash),
+		prevOutCache:       newPrevOutCache(chain, prevOutCacheSizeMiB),
+		taprootStartHeight: taprootStartHeight,
+		taprootSupported:   taprootSupported,
 	}
-	c.clearData()
+	s.producerBase = producerBase{
+		quit:           quit,
+		chain:          chain,
+		h2hCache:       h2hCache,
+		chainParams:    chainParams,
+		name:           "SP tweak data",
+		baseDir:        baseDir,
+		subDir:         SPTweakFileDir,
+		fileSuffix:     SPTweakFileSuffix,
+		extractRegex:   spTweakFileNameExtractRegex,
+		entriesPerFile: itemsPerFile,
+		reOrgSafeDepth: reOrgSafeDepth,
+		hooks: producerHooks{
+			ingest:          s.ingest,
+			writeSealedFile: s.writeSealedFile,
+			pruneLocked:     s.pruneLocked,
+			cachedHash:      s.cachedHash,
+			afterCatchUp:    s.prevOutCache.Disable,
+		},
+	}
+	s.lastSealedHeight.Store(-1)
 
-	return c
+	return s
 }
 
-func (s *spTweakFiles) isStartupComplete() bool {
-	return s.startupComplete.Load()
-}
-
-func (s *spTweakFiles) getCurrentHeight() int32 {
-	return s.currentHeight.Load()
-}
-
-func (s *spTweakFiles) clearData() {
-	s.Lock()
-	defer s.Unlock()
-
-	s.tweakData = make(
-		map[int32]map[int32]*btcec.PublicKey, s.blocksPerFile,
-	)
-}
-
-func (s *spTweakFiles) updateFiles(targetHeight int32) error {
-	log.Debugf("Updating SP tweak data in %s for network %s", s.baseDir,
-		s.chainParams.Name)
-
-	spDir := filepath.Join(s.baseDir, SPTweakFileDir)
-	err := os.MkdirAll(spDir, DirectoryMode)
-	if err != nil {
-		return fmt.Errorf("error creating directory %s: %w", spDir, err)
-	}
-
-	lastBlock, err := lastFile(
-		spDir, SPTweakFileSuffix, spTweakFileNameExtractRegex,
-	)
-	if err != nil {
-		return fmt.Errorf("error getting last SP tweak data file: %w",
-			err)
-	}
-
-	// If we already had some blocks written, then we need to start from
-	// the next block.
-	startBlock := lastBlock
-	if lastBlock > 0 {
-		startBlock++
-	}
-
-	log.Debugf("Writing SP tweak data files from block %d to block %d",
-		startBlock, targetHeight)
-	err = s.updateCacheAndFiles(startBlock, targetHeight)
-	if err != nil {
-		return fmt.Errorf("error updating blocks: %w", err)
-	}
-
-	// Allow serving requests now that we're caught up.
-	s.startupComplete.Store(true)
-
-	// We can disable the UTXO cache now to free up some memory.
-	s.prevOutCache.Disable()
-
-	// Let's now go into the infinite loop of updating the filter files
-	// whenever a new block is mined.
-	log.Debugf("Caught up SP tweak data to best block %d, starting to "+
-		"poll for new blocks", targetHeight)
-	for {
-		select {
-		case <-time.After(blockPollInterval):
-		case <-s.quit:
-			return errServerShutdown
-		}
-
-		height, err := s.chain.GetBlockCount()
-		if err != nil {
-			return fmt.Errorf("error getting best block: %w", err)
-		}
-
-		currentBlock := s.currentHeight.Load()
-		if int32(height) == currentBlock {
-			continue
-		}
-
-		log.Infof("Processing SP tweak data for new block mined at "+
-			"height %d", height)
-		err = s.updateCacheAndFiles(currentBlock+1, int32(height))
-		if err != nil {
-			return fmt.Errorf("error updating SP tweak data for "+
-				"blocks: %w", err)
-		}
-	}
-}
-
-func (s *spTweakFiles) updateCacheAndFiles(startBlock, endBlock int32) error {
-	spDir := filepath.Join(s.baseDir, SPTweakFileDir)
-	net := s.chainParams.Net
-	taprootStartHeight, taprootSupported := TaprootActivationHeights[net]
-
-	if !taprootSupported {
-		log.Warnf("Silent Payments tweak data indexing enabled, "+
-			"but Taproot is not supported on network %s",
+// updateFiles shadows producerBase.updateFiles so we can short-circuit when
+// the active network doesn't support Taproot — SP tweak indexing is a
+// no-op in that case, but the server still expects the producer goroutine
+// to exist and to be queryable. We log loudly and idle until shutdown.
+func (s *spTweakFiles) updateFiles(numBlocks int32) error {
+	if !s.taprootSupported {
+		log.Warnf("Silent Payments tweak data indexing enabled, but "+
+			"Taproot is not supported on network %s — idling",
 			s.chainParams.Name)
 
+		// Mark startup complete so /status etc. don't 503, and
+		// wait for shutdown. We deliberately don't ingest anything
+		// so the height-keyed endpoints will report missing data
+		// for any requested height.
+		s.startupComplete.Store(true)
+		<-s.quit
+		return errServerShutdown
+	}
+
+	return s.producerBase.updateFiles(numBlocks)
+}
+
+func (s *spTweakFiles) ingest(height int32) error {
+	hash, err := s.h2hCache.getBlockHash(height)
+	if err != nil {
+		return fmt.Errorf("error getting block hash for height %d: %w",
+			height, err)
+	}
+
+	s.Lock()
+	s.tweakData[height] = make(map[int32]*btcec.PublicKey)
+	s.heightToHash[height] = *hash
+	s.Unlock()
+
+	// Pre-Taproot blocks can't contain Silent Payment outputs, so we
+	// only ingest the empty tweakData entry above so sealReadyFiles
+	// can serialize a coherent JSON file.
+	if height < s.taprootStartHeight {
 		return nil
 	}
 
-	// Generate the silent payment tweak data as requested.
-	for i := startBlock; i <= endBlock; i++ {
-		// Were we interrupted?
-		select {
-		case <-s.quit:
-			return errServerShutdown
-		default:
-		}
+	block, err := s.chain.GetBlock(hash)
+	if err != nil {
+		return fmt.Errorf("error getting block for SP tweak data: %w",
+			err)
+	}
+	s.prevOutCache.numBlock++
 
-		s.Lock()
-		s.tweakData[i] = make(map[int32]*btcec.PublicKey)
-		s.Unlock()
-
-		// We don't look at blocks before Taproot activation, as Silent
-		// Payments require Taproot.
-		if i >= taprootStartHeight {
-			blockHash, err := s.h2hCache.getBlockHash(i)
-			if err != nil {
-				return fmt.Errorf("error getting block hash "+
-					"for height %d: %w", i, err)
-			}
-
-			block, err := s.chain.GetBlock(blockHash)
-			if err != nil {
-				return fmt.Errorf("error getting block for SP "+
-					"tweak data: %w", err)
-			}
-			s.prevOutCache.numBlock++
-
-			err = s.indexBlockSPTweakData(i, block)
-			if err != nil {
-				return fmt.Errorf("error indexing SP tweak "+
-					"data: %w", err)
-			}
-		}
-
-		if (i+1)%s.blocksPerFile == 0 {
-			fileStart := i - s.blocksPerFile + 1
-			spTweakFileName := fmt.Sprintf(
-				SPTweakFileNamePattern, spDir, fileStart, i,
-			)
-
-			log.Debugf("Reached SP tweak data height %d, writing"+
-				"file starting at %d, containing %d items to "+
-				"%s", i, fileStart, s.blocksPerFile,
-				spTweakFileName)
-
-			err := s.writeSPTweaks(spTweakFileName, fileStart, i)
-			if err != nil {
-				return fmt.Errorf("error writing SP tweak "+
-					"data: %w", err)
-			}
-
-			s.prevOutCache.LogAndReset()
-			s.clearData()
-		}
-
-		s.currentHeight.Store(i)
+	if err := s.indexBlockSPTweakData(height, block); err != nil {
+		return fmt.Errorf("error indexing SP tweak data: %w", err)
 	}
 
 	return nil
+}
+
+func (s *spTweakFiles) writeSealedFile(fileStart, fileEnd int32) error {
+	spDir := filepath.Join(s.baseDir, s.subDir)
+	fileName := fmt.Sprintf(SPTweakFileNamePattern, spDir, fileStart,
+		fileEnd)
+
+	if err := s.writeSPTweaks(fileName, fileStart, fileEnd); err != nil {
+		return err
+	}
+
+	// Log + reset the prev-out cache stats now that we've written
+	// another batch of tweak data to disk. (The cache itself gets
+	// fully released by the afterCatchUp hook once the initial
+	// catch-up completes.)
+	s.prevOutCache.LogAndReset()
+	return nil
+}
+
+func (s *spTweakFiles) pruneLocked(start, end int32) {
+	for j := start; j <= end; j++ {
+		delete(s.tweakData, j)
+		delete(s.heightToHash, j)
+	}
+}
+
+func (s *spTweakFiles) cachedHash(height int32) (chainhash.Hash, bool) {
+	s.RLock()
+	defer s.RUnlock()
+
+	hash, ok := s.heightToHash[height]
+	return hash, ok
 }
 
 // indexBlockSPTweakData examines the given block for transactions that
@@ -460,10 +405,19 @@ func (s *spTweakFiles) writeSPTweaks(fileName string, startIndex,
 		}
 	}()
 
-	return s.serializeSPTweakData(file, startIndex, endIndex)
+	return s.serializeSPTweakDataLocked(file, startIndex, endIndex)
 }
 
 func (s *spTweakFiles) serializeSPTweakData(w io.Writer, startIndex,
+	endIndex int32) error {
+
+	s.RLock()
+	defer s.RUnlock()
+
+	return s.serializeSPTweakDataLocked(w, startIndex, endIndex)
+}
+
+func (s *spTweakFiles) serializeSPTweakDataLocked(w io.Writer, startIndex,
 	endIndex int32) error {
 
 	// We need to add plus one here since the end index is inclusive in the

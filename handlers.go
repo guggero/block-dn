@@ -110,6 +110,7 @@ type serializable interface {
 type blockProcessor interface {
 	isStartupComplete() bool
 	getCurrentHeight() int32
+	getLastSealedHeight() int32
 }
 
 func (s *server) createRouter() *mux.Router {
@@ -174,7 +175,7 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
-	bestFilter, ok := s.headerFiles.filterHeaders[*bestBlock]
+	bestFilter, ok := s.headerFiles.filterHeaderAtHeight(bestHeight)
 	if !ok {
 		sendError(w, status500, errInvalidSyncStatus)
 		return
@@ -345,8 +346,10 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 		addCacheHeaders(w, maxAgeDisk)
 		w.WriteHeader(http.StatusOK)
 		if err := streamFile(w, fileName); err != nil {
+			// We've already written response headers and possibly
+			// part of the body. We can't change status now;
+			// log and stop.
 			log.Errorf("Error while streaming file: %v", err)
-			sendError(w, status500, err)
 		}
 
 		return
@@ -404,17 +407,20 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 	// short-term cacheable only.
 	cache := maxAgeMemory
 
-	// We also check that we don't need to server partial content from
-	// files, as that would make things a bit more tricky.
-	maxCacheFileEndHeight := int64(
-		(s.headerFiles.currentHeight.Load() / entriesPerFile) *
-			entriesPerFile,
-	)
+	// The cache-tier choice gates on whether every byte in the response
+	// has already been written to a sealed file. That's
+	// lastSealedHeight + 1 (the smallest endHeight that's fully covered by
+	// on-disk files). Using currentHeight here would be wrong: with reorg-
+	// safe sealing, a file boundary at or below currentHeight isn't
+	// guaranteed to be on disk yet, and marking a memory-served (still
+	// mutable) response as long-lived would re-create the very bug that
+	// motivated reorg-safe sealing.
+	lastSealedBoundary := s.headerFiles.lastSealedHeight.Load() + 1
 
 	// We don't want to return partial files. So for any range that can be
 	// served only from files (i.e. up to the last complete cache file), we
 	// require the end height to be a multiple of the entries per file.
-	if endHeight <= maxCacheFileEndHeight {
+	if endHeight <= int64(lastSealedBoundary) {
 		// We're in the file-only range, so we can set the cache
 		// duration to disk cache time.
 		cache = maxAgeDisk
@@ -466,8 +472,16 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 		}
 
 		if err := streamFile(w, fileName); err != nil {
-			log.Errorf("Error while streaming file: %v", err)
-			sendError(w, status500, err)
+			// Response headers are already on the wire and we've
+			// streamed an unknown number of bytes. Continuing the
+			// loop would append the next file's bytes after a
+			// truncated current file, producing a corrupt stream
+			// that decodes as misaligned headers — exactly the
+			// bug that motivated reorg-safe sealing on the
+			// producer side. Just log and bail.
+			log.Errorf("Error while streaming file %s: %v",
+				fileName, err)
+			return
 		}
 	}
 
@@ -480,8 +494,11 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 	}
 
 	// The requested end height goes over what's in files, so we need to
-	// stream the remaining headers from memory.
-	err = serializeCb(w, int32(lastHeight), int32(endHeight))
+	// stream the remaining headers from memory. endHeight is exclusive
+	// (matches the file path's behavior of stopping the loop when
+	// lastHeight == endHeight without writing one more entry), so the
+	// inclusive last index here is endHeight - 1.
+	err = serializeCb(w, int32(lastHeight), int32(endHeight)-1)
 	if err != nil {
 		log.Errorf("Error serializing: %v", err)
 	}
@@ -782,22 +799,31 @@ func addCacheHeaders(w http.ResponseWriter, maxAge time.Duration) {
 	// A max-age of 0 means no caching at all, as something is not safe
 	// to cache yet.
 	if maxAge == 0 {
-		w.Header().Add(HeaderCache, "no-cache")
+		w.Header().Set(HeaderCache, "no-cache")
 
 		return
 	}
 
-	// Make caching even more aggressive if the content is immutable.
+	secs := int64(maxAge.Seconds())
+
+	// The disk tier serves bytes that are durably on disk past the
+	// reorg-safe depth. They effectively never change — but "effectively"
+	// is not "never" (a reorg deeper than --reorg-safe-depth would
+	// invalidate them), so we deliberately do NOT advertise `immutable`.
+	// Instead we let intermediaries serve a stale response while they
+	// revalidate in the background, so even browsers that already cached
+	// bad bytes can self-heal after a manual CDN purge.
 	if maxAge >= maxAgeDisk {
-		w.Header().Add(
-			HeaderCache, fmt.Sprintf("public, max-age=%d, "+
-				"immutable", int64(maxAge.Seconds())),
-		)
+		w.Header().Set(HeaderCache, fmt.Sprintf(
+			"public, max-age=%d, stale-while-revalidate=86400",
+			secs,
+		))
+
+		return
 	}
 
-	w.Header().Add(
-		HeaderCache, fmt.Sprintf("public, max-age=%d",
-			int64(maxAge.Seconds())),
+	w.Header().Set(
+		HeaderCache, fmt.Sprintf("public, max-age=%d", secs),
 	)
 }
 
