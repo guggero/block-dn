@@ -15,8 +15,8 @@ import (
 	"github.com/btcsuite/btcd/btcutil/gcs"
 	"github.com/btcsuite/btcd/btcutil/gcs/builder"
 	"github.com/btcsuite/btcd/btcutil/psbt"
-	sp "github.com/btcsuite/btcd/btcutil/silentpayments"
 	"github.com/btcsuite/btcd/chaincfg"
+	sp "github.com/btcsuite/btcd/silentpayments"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btclog/v2"
@@ -85,8 +85,8 @@ func TestSPTweakDataFilesUpdate(t *testing.T) {
 	quit := make(chan struct{})
 	h2hCache := newH2HCache(backend)
 	hf := newSPTweakFiles(
-		tweakBlocksPerFile, backend, quit, dataDir, &testParams,
-		h2hCache, DefaultPrevOutCacheMiBytes,
+		tweakBlocksPerFile, testReOrgSafeDepth, backend, quit, dataDir,
+		&testParams, h2hCache, DefaultPrevOutCacheMiBytes,
 	)
 
 	var wg sync.WaitGroup
@@ -119,8 +119,8 @@ func TestSPTweakDataFilesUpdate(t *testing.T) {
 
 	quit = make(chan struct{})
 	hf = newSPTweakFiles(
-		tweakBlocksPerFile, backend, quit, dataDir, &testParams,
-		h2hCache, DefaultPrevOutCacheMiBytes,
+		tweakBlocksPerFile, testReOrgSafeDepth, backend, quit, dataDir,
+		&testParams, h2hCache, DefaultPrevOutCacheMiBytes,
 	)
 
 	// Wait for the final blocks to be written.
@@ -168,8 +168,8 @@ func TestSilentPaymentsDetection(t *testing.T) {
 	quit := make(chan struct{})
 	h2hCache := newH2HCache(backend)
 	hf := newSPTweakFiles(
-		tweakBlocksPerFile, backend, quit, dataDir, &testParams,
-		h2hCache, DefaultPrevOutCacheMiBytes,
+		tweakBlocksPerFile, testReOrgSafeDepth, backend, quit, dataDir,
+		&testParams, h2hCache, DefaultPrevOutCacheMiBytes,
 	)
 
 	// Wait for the initial blocks to be written.

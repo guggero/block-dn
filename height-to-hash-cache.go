@@ -83,6 +83,8 @@ func (c *heightToHashCache) loadFromHeaders(headerDir string) (int32, error) {
 	return c.bestHeight.Load(), nil
 }
 
+// getBlockHash returns the block hash for the given height. If the hash isn't
+// cached yet, it is fetched from the backend and added to the cache.
 func (c *heightToHashCache) getBlockHash(h int32) (*chainhash.Hash, error) {
 	c.RLock()
 	defer c.RUnlock()
@@ -99,6 +101,9 @@ func (c *heightToHashCache) getBlockHash(h int32) (*chainhash.Hash, error) {
 		c.RUnlock()
 		c.Lock()
 		c.heightToHash[h] = *hash
+		if h > c.bestHeight.Load() {
+			c.bestHeight.Store(h)
+		}
 		c.Unlock()
 		c.RLock()
 
@@ -106,4 +111,19 @@ func (c *heightToHashCache) getBlockHash(h int32) (*chainhash.Hash, error) {
 	}
 
 	return &hash, nil
+}
+
+// invalidate drops all cached height→hash entries at or above fromHeight and
+// resets bestHeight to fromHeight - 1. It's the cache-side counterpart to a
+// reorg rollback: after the producers have pruned their per-height state for
+// the affected range, invalidate clears the now-stale hashes so the next
+// getBlockHash call hits bitcoind and learns the new chain.
+func (c *heightToHashCache) invalidate(fromHeight int32) {
+	c.Lock()
+	defer c.Unlock()
+
+	for h := fromHeight; h <= c.bestHeight.Load(); h++ {
+		delete(c.heightToHash, h)
+	}
+	c.bestHeight.Store(fromHeight - 1)
 }

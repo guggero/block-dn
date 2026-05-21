@@ -20,7 +20,7 @@ defaults:
 env:
   GO_VERSION: 1.24.10
   LINT_VERSION: v2.6.2
-  BITCOIND_VERSION: "30"
+  BITCOIND_VERSION: "31"
 
 jobs:
   ########################

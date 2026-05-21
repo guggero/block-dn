@@ -1,13 +1,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"sync"
-	"sync/atomic"
-	"time"
 
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -15,210 +13,123 @@ import (
 	"github.com/btcsuite/btcd/wire"
 )
 
+// errDeepReorg signals that bitcoind reorganized past block-dn's reorg-safe
+// depth — i.e., past the highest block already written to disk. Recovering
+// would require rewriting an "immutable" file, so the producer refuses and
+// asks the server to shut down. Operators can bump --reorg-safe-depth,
+// regenerate, and restart.
+var errDeepReorg = errors.New("reorg deeper than --reorg-safe-depth; " +
+	"refusing to rewrite sealed files")
+
 type headerFiles struct {
-	sync.RWMutex
+	producerBase
 
-	quit <-chan struct{}
-
-	h2hCache *heightToHashCache
-
-	headersPerFile int32
-	baseDir        string
-	chain          *rpcclient.Client
-	chainParams    *chaincfg.Params
-
-	startupComplete atomic.Bool
-	currentHeight   atomic.Int32
-
-	headers       map[chainhash.Hash]*wire.BlockHeader
-	filterHeaders map[chainhash.Hash]*chainhash.Hash
+	headers       map[int32]*wire.BlockHeader
+	filterHeaders map[int32]chainhash.Hash
 }
 
-func newHeaderFiles(headersPerFile int32, chain *rpcclient.Client,
-	quit <-chan struct{}, baseDir string, chainParams *chaincfg.Params,
-	h2hCache *heightToHashCache) *headerFiles {
+func newHeaderFiles(headersPerFile, reOrgSafeDepth int32,
+	chain *rpcclient.Client, quit <-chan struct{}, baseDir string,
+	chainParams *chaincfg.Params, h2hCache *heightToHashCache) *headerFiles {
 
-	cf := &headerFiles{
+	hf := &headerFiles{
+		headers:       make(map[int32]*wire.BlockHeader),
+		filterHeaders: make(map[int32]chainhash.Hash),
+	}
+	hf.producerBase = producerBase{
 		quit:           quit,
-		h2hCache:       h2hCache,
-		headersPerFile: headersPerFile,
-		baseDir:        baseDir,
 		chain:          chain,
+		h2hCache:       h2hCache,
 		chainParams:    chainParams,
+		name:           "header",
+		baseDir:        baseDir,
+		subDir:         HeaderFileDir,
+		fileSuffix:     HeaderFileSuffix,
+		extractRegex:   headerFileNameExtractRegex,
+		entriesPerFile: headersPerFile,
+		reOrgSafeDepth: reOrgSafeDepth,
+		hooks: producerHooks{
+			ingest:          hf.ingest,
+			writeSealedFile: hf.writeSealedFile,
+			pruneLocked:     hf.pruneLocked,
+			cachedHash:      hf.cachedHash,
+		},
 	}
-	cf.clearData()
+	hf.lastSealedHeight.Store(-1)
 
-	return cf
+	return hf
 }
 
-func (h *headerFiles) isStartupComplete() bool {
-	return h.startupComplete.Load()
-}
+// ingest fetches the block header and matching compact-filter header for
+// the given height and stores both in-memory.
+func (h *headerFiles) ingest(height int32) error {
+	hash, err := h.h2hCache.getBlockHash(height)
+	if err != nil {
+		return fmt.Errorf("error getting block hash for height %d: %w",
+			height, err)
+	}
 
-func (h *headerFiles) getCurrentHeight() int32 {
-	return h.currentHeight.Load()
-}
+	header, err := h.chain.GetBlockHeader(hash)
+	if err != nil {
+		return fmt.Errorf("error getting block header for hash %s: %w",
+			hash, err)
+	}
 
-func (h *headerFiles) clearData() {
+	filter, err := h.chain.GetBlockFilter(*hash, &filterBasic)
+	if err != nil {
+		return fmt.Errorf("error getting block filter for hash %s: %w",
+			hash, err)
+	}
+	filterHeader, err := chainhash.NewHashFromStr(filter.Header)
+	if err != nil {
+		return fmt.Errorf("error parsing filter header for hash %s: %w",
+			hash, err)
+	}
+
 	h.Lock()
-	defer h.Unlock()
-
-	h.headers = make(map[chainhash.Hash]*wire.BlockHeader, h.headersPerFile)
-	h.filterHeaders = make(
-		map[chainhash.Hash]*chainhash.Hash, h.headersPerFile,
-	)
-}
-
-// updateFiles updates the header and filter files on disk.
-//
-// NOTE: Must be called as a goroutine.
-func (h *headerFiles) updateFiles(numBlocks int32) error {
-	log.Debugf("Updating header files in %s for network %s", h.baseDir,
-		h.chainParams.Name)
-
-	headerDir := filepath.Join(h.baseDir, HeaderFileDir)
-	err := os.MkdirAll(headerDir, DirectoryMode)
-	if err != nil {
-		return fmt.Errorf("error creating directory %s: %w", headerDir,
-			err)
-	}
-
-	lastBlock, err := lastFile(
-		headerDir, HeaderFileSuffix, headerFileNameExtractRegex,
-	)
-	if err != nil {
-		return fmt.Errorf("error getting last header file: %w", err)
-	}
-
-	// If we already had some blocks written, then we need to start from
-	// the next block.
-	startBlock := lastBlock
-	if lastBlock > 0 {
-		startBlock++
-	}
-
-	log.Debugf("Writing header files from block %d to block %d", startBlock,
-		numBlocks)
-	err = h.updateCacheAndFiles(startBlock, numBlocks)
-	if err != nil {
-		return fmt.Errorf("error updating blocks: %w", err)
-	}
-
-	// Allow serving requests now that we're caught up.
-	h.startupComplete.Store(true)
-
-	// Let's now go into the infinite loop of updating the filter files
-	// whenever a new block is mined.
-	log.Debugf("Caught up headers to best block %d, starting to poll for "+
-		"new blocks", numBlocks)
-	for {
-		select {
-		case <-time.After(blockPollInterval):
-		case <-h.quit:
-			return errServerShutdown
-		}
-
-		height, err := h.chain.GetBlockCount()
-		if err != nil {
-			return fmt.Errorf("error getting best block: %w", err)
-		}
-
-		currentBlock := h.currentHeight.Load()
-		if int32(height) == currentBlock {
-			continue
-		}
-
-		log.Infof("Processing headers for new block mined at height %d",
-			height)
-		err = h.updateCacheAndFiles(currentBlock+1, int32(height))
-		if err != nil {
-			return fmt.Errorf("error updating headers for blocks: "+
-				"%w", err)
-		}
-	}
-}
-
-func (h *headerFiles) updateCacheAndFiles(startBlock, endBlock int32) error {
-	headerDir := filepath.Join(h.baseDir, HeaderFileDir)
-
-	for i := startBlock; i <= endBlock; i++ {
-		// Were we interrupted?
-		select {
-		case <-h.quit:
-			return errServerShutdown
-		default:
-		}
-
-		hash, err := h.h2hCache.getBlockHash(i)
-		if err != nil {
-			return fmt.Errorf("error getting block hash for "+
-				"height %d: %w", i, err)
-		}
-
-		header, err := h.chain.GetBlockHeader(hash)
-		if err != nil {
-			return fmt.Errorf("error getting block header for "+
-				"hash %s: %w", hash, err)
-		}
-
-		filter, err := h.chain.GetBlockFilter(*hash, &filterBasic)
-		if err != nil {
-			return fmt.Errorf("error getting block filter for "+
-				"hash %s: %w", hash, err)
-		}
-		filterHeader, err := chainhash.NewHashFromStr(filter.Header)
-		if err != nil {
-			return fmt.Errorf("error parsing filter header for "+
-				"hash %s: %w", hash, err)
-		}
-
-		h.Lock()
-		h.headers[*hash] = header
-		h.filterHeaders[*hash] = filterHeader
-		h.Unlock()
-
-		if (i+1)%h.headersPerFile == 0 {
-			fileStart := i - h.headersPerFile + 1
-			headerFileName := fmt.Sprintf(
-				HeaderFileNamePattern, headerDir, fileStart, i,
-			)
-			filterHeaderFileName := fmt.Sprintf(
-				FilterHeaderFileNamePattern, headerDir,
-				fileStart, i,
-			)
-
-			log.Debugf("Reached header height %d, writing file "+
-				"starting at %d, containing %d items to %s", i,
-				fileStart, h.headersPerFile, headerFileName)
-
-			err = h.writeHeaders(headerFileName, fileStart, i)
-			if err != nil {
-				return fmt.Errorf("error writing headers: %w",
-					err)
-			}
-
-			log.Debugf("Reached filter header height %d, writing "+
-				"file starting at %d, containing %d items to "+
-				"%s", i, fileStart, h.headersPerFile,
-				filterHeaderFileName)
-
-			err = h.writeFilterHeaders(
-				filterHeaderFileName, fileStart, i,
-			)
-			if err != nil {
-				return fmt.Errorf("error writing filter "+
-					"headers: %w", err)
-			}
-
-			// We don't need the headers or filters anymore, so
-			// clear them out.
-			h.clearData()
-		}
-
-		h.currentHeight.Store(i)
-	}
+	h.headers[height] = header
+	h.filterHeaders[height] = *filterHeader
+	h.Unlock()
 
 	return nil
+}
+
+// writeSealedFile writes both the block-header and filter-header files for
+// the just-sealed range to disk.
+func (h *headerFiles) writeSealedFile(fileStart, fileEnd int32) error {
+	headerDir := filepath.Join(h.baseDir, h.subDir)
+
+	headerFileName := fmt.Sprintf(HeaderFileNamePattern, headerDir,
+		fileStart, fileEnd)
+	if err := h.writeHeaders(headerFileName, fileStart, fileEnd); err != nil {
+		return err
+	}
+
+	filterHeaderFileName := fmt.Sprintf(FilterHeaderFileNamePattern,
+		headerDir, fileStart, fileEnd)
+	return h.writeFilterHeaders(filterHeaderFileName, fileStart, fileEnd)
+}
+
+// pruneLocked drops headers and filter-headers entries for [start, end].
+// Called with the producer's write lock held.
+func (h *headerFiles) pruneLocked(start, end int32) {
+	for j := start; j <= end; j++ {
+		delete(h.headers, j)
+		delete(h.filterHeaders, j)
+	}
+}
+
+// cachedHash returns the block hash for the given in-memory height by
+// computing it from the stored header. Used by the base's reorg detection.
+func (h *headerFiles) cachedHash(height int32) (chainhash.Hash, bool) {
+	h.RLock()
+	defer h.RUnlock()
+
+	header, ok := h.headers[height]
+	if !ok {
+		return chainhash.Hash{}, false
+	}
+	return header.BlockHash(), true
 }
 
 func (h *headerFiles) writeHeaders(fileName string, startIndex,
@@ -233,8 +144,9 @@ func (h *headerFiles) writeHeaders(fileName string, startIndex,
 		return fmt.Errorf("error creating file %s: %w", fileName, err)
 	}
 
-	err = h.serializeHeaders(file, startIndex, endIndex)
+	err = h.serializeHeadersLocked(file, startIndex, endIndex)
 	if err != nil {
+		_ = file.Close()
 		return fmt.Errorf("error writing headers to file %s: %w",
 			fileName, err)
 	}
@@ -247,22 +159,27 @@ func (h *headerFiles) writeHeaders(fileName string, startIndex,
 	return nil
 }
 
+// serializeHeaders writes raw block headers for [startIndex, endIndex] to w.
+// Acquires the read lock; safe to call from request handlers.
 func (h *headerFiles) serializeHeaders(w io.Writer, startIndex,
 	endIndex int32) error {
 
+	h.RLock()
+	defer h.RUnlock()
+
+	return h.serializeHeadersLocked(w, startIndex, endIndex)
+}
+
+func (h *headerFiles) serializeHeadersLocked(w io.Writer, startIndex,
+	endIndex int32) error {
+
 	for j := startIndex; j <= endIndex; j++ {
-		hash, err := h.h2hCache.getBlockHash(j)
-		if err != nil {
-			return fmt.Errorf("invalid height %d", j)
-		}
-
-		header, ok := h.headers[*hash]
+		header, ok := h.headers[j]
 		if !ok {
-			return fmt.Errorf("missing header for hash %s (height "+
-				"%d)", hash.String(), j)
+			return fmt.Errorf("missing header at height %d", j)
 		}
 
-		err = header.Serialize(w)
+		err := header.Serialize(w)
 		if err != nil {
 			return fmt.Errorf("error writing headers: %w", err)
 		}
@@ -283,8 +200,9 @@ func (h *headerFiles) writeFilterHeaders(fileName string, startIndex,
 		return fmt.Errorf("error creating file %s: %w", fileName, err)
 	}
 
-	err = h.serializeFilterHeaders(file, startIndex, endIndex)
+	err = h.serializeFilterHeadersLocked(file, startIndex, endIndex)
 	if err != nil {
+		_ = file.Close()
 		return fmt.Errorf("error writing filter headers to file %s: %w",
 			fileName, err)
 	}
@@ -297,19 +215,25 @@ func (h *headerFiles) writeFilterHeaders(fileName string, startIndex,
 	return nil
 }
 
+// serializeFilterHeaders writes raw filter headers for [startIndex, endIndex]
+// to w. Acquires the read lock; safe to call from request handlers.
 func (h *headerFiles) serializeFilterHeaders(w io.Writer, startIndex,
 	endIndex int32) error {
 
-	for j := startIndex; j <= endIndex; j++ {
-		hash, err := h.h2hCache.getBlockHash(j)
-		if err != nil {
-			return fmt.Errorf("invalid height %d", j)
-		}
+	h.RLock()
+	defer h.RUnlock()
 
-		filterHeader, ok := h.filterHeaders[*hash]
+	return h.serializeFilterHeadersLocked(w, startIndex, endIndex)
+}
+
+func (h *headerFiles) serializeFilterHeadersLocked(w io.Writer, startIndex,
+	endIndex int32) error {
+
+	for j := startIndex; j <= endIndex; j++ {
+		filterHeader, ok := h.filterHeaders[j]
 		if !ok {
-			return fmt.Errorf("missing filter header for hash %s "+
-				"(height %d)", hash.String(), j)
+			return fmt.Errorf("missing filter header at height %d",
+				j)
 		}
 
 		num, err := w.Write(filterHeader[:])
@@ -324,4 +248,15 @@ func (h *headerFiles) serializeFilterHeaders(w io.Writer, startIndex,
 	}
 
 	return nil
+}
+
+// filterHeaderAtHeight returns the cached filter header for the given height
+// or false if the height is not currently in memory (typically because it's
+// already been sealed to disk).
+func (h *headerFiles) filterHeaderAtHeight(hgt int32) (chainhash.Hash, bool) {
+	h.RLock()
+	defer h.RUnlock()
+
+	hash, ok := h.filterHeaders[hgt]
+	return hash, ok
 }

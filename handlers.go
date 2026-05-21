@@ -110,6 +110,7 @@ type serializable interface {
 type blockProcessor interface {
 	isStartupComplete() bool
 	getCurrentHeight() int32
+	getLastSealedHeight() int32
 }
 
 func (s *server) createRouter() *mux.Router {
@@ -119,12 +120,20 @@ func (s *server) createRouter() *mux.Router {
 	router.HandleFunc("/status", s.statusRequestHandler)
 	router.HandleFunc("/headers/{height:[0-9]+}", s.headersRequestHandler)
 	router.HandleFunc(
+		"/headers/import/latest",
+		s.headersImportLatestRequestHandler,
+	)
+	router.HandleFunc(
 		"/headers/import/{height:[0-9]+}",
 		s.headersImportRequestHandler,
 	)
 	router.HandleFunc(
 		"/filter-headers/{height:[0-9]+}",
 		s.filterHeadersRequestHandler,
+	)
+	router.HandleFunc(
+		"/filter-headers/import/latest",
+		s.filterHeadersImportLatestRequestHandler,
 	)
 	router.HandleFunc(
 		"/filter-headers/import/{height:[0-9]+}",
@@ -174,7 +183,7 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
-	bestFilter, ok := s.headerFiles.filterHeaders[*bestBlock]
+	bestFilter, ok := s.headerFiles.filterHeaderAtHeight(bestHeight)
 	if !ok {
 		sendError(w, status500, errInvalidSyncStatus)
 		return
@@ -224,6 +233,21 @@ func (s *server) headersImportRequestHandler(w http.ResponseWriter,
 	)
 }
 
+// headersImportLatestRequestHandler serves /headers/import/latest, returning
+// every block header from height 0 up to and including the server's current
+// tip. This is the convenience shortcut for clients (test runners,
+// neutrino-style importers) that don't want to discover the current height
+// before requesting the import file. It always serves at the memory tier
+// since the tip is mutable.
+func (s *server) headersImportLatestRequestHandler(w http.ResponseWriter,
+	r *http.Request) {
+
+	s.heightBasedImportLatestHandler(
+		w, r, HeaderFileDir, HeaderFileNamePattern, s.headersPerFile,
+		s.headerFiles.serializeHeaders, typeBlockHeader,
+	)
+}
+
 func (s *server) filterHeadersRequestHandler(w http.ResponseWriter,
 	r *http.Request) {
 
@@ -238,6 +262,18 @@ func (s *server) filterHeadersImportRequestHandler(w http.ResponseWriter,
 	r *http.Request) {
 
 	s.heightBasedImportRequestHandler(
+		w, r, HeaderFileDir, FilterHeaderFileNamePattern,
+		s.headersPerFile, s.headerFiles.serializeFilterHeaders,
+		typeFilterHeader,
+	)
+}
+
+// filterHeadersImportLatestRequestHandler is the /filter-headers/import/latest
+// counterpart to headersImportLatestRequestHandler.
+func (s *server) filterHeadersImportLatestRequestHandler(w http.ResponseWriter,
+	r *http.Request) {
+
+	s.heightBasedImportLatestHandler(
 		w, r, HeaderFileDir, FilterHeaderFileNamePattern,
 		s.headersPerFile, s.headerFiles.serializeFilterHeaders,
 		typeFilterHeader,
@@ -345,8 +381,10 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 		addCacheHeaders(w, maxAgeDisk)
 		w.WriteHeader(http.StatusOK)
 		if err := streamFile(w, fileName); err != nil {
+			// We've already written response headers and possibly
+			// part of the body. We can't change status now;
+			// log and stop.
 			log.Errorf("Error while streaming file: %v", err)
-			sendError(w, status500, err)
 		}
 
 		return
@@ -376,14 +414,7 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 	serializeCb func(w io.Writer, startIndex, endIndex int32) error,
 	fileType byte) {
 
-	// These kinds of requests aren't available in light mode.
-	if s.lightMode {
-		sendError(w, status503, errUnavailableInLightMode)
-		return
-	}
-
-	if !s.headerFiles.startupComplete.Load() {
-		sendError(w, status503, errStillStartingUp)
+	if !s.checkImportPreconditions(w) {
 		return
 	}
 
@@ -399,29 +430,88 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 		return
 	}
 
+	s.serveHeightBasedImport(
+		w, subDir, fileNamePattern, entriesPerFile, serializeCb,
+		fileType, endHeight,
+	)
+}
+
+// heightBasedImportLatestHandler is the shared implementation for the
+// /headers/import/latest and /filter-headers/import/latest convenience
+// routes. It resolves endHeight to the server's current tip + 1 (because
+// endHeight is exclusive, so currentHeight+1 covers heights 0..currentHeight)
+// and delegates to the same serving logic as the numeric route.
+func (s *server) heightBasedImportLatestHandler(w http.ResponseWriter,
+	_ *http.Request, subDir, fileNamePattern string, entriesPerFile int32,
+	serializeCb func(w io.Writer, startIndex, endIndex int32) error,
+	fileType byte) {
+
+	if !s.checkImportPreconditions(w) {
+		return
+	}
+
+	endHeight := int64(s.headerFiles.currentHeight.Load()) + 1
+
+	s.serveHeightBasedImport(
+		w, subDir, fileNamePattern, entriesPerFile, serializeCb,
+		fileType, endHeight,
+	)
+}
+
+// checkImportPreconditions enforces the two gates shared by every import
+// endpoint (light mode and startup), writing the appropriate 503 error and
+// returning false if either fails. Callers should bail when this returns
+// false.
+func (s *server) checkImportPreconditions(w http.ResponseWriter) bool {
+	if s.lightMode {
+		sendError(w, status503, errUnavailableInLightMode)
+		return false
+	}
+
+	if !s.headerFiles.startupComplete.Load() {
+		sendError(w, status503, errStillStartingUp)
+		return false
+	}
+
+	return true
+}
+
+// serveHeightBasedImport writes the import metadata header and then streams
+// headers from 0..endHeight-1 to w, sourced from on-disk files where
+// available and from the in-memory tail otherwise. It assumes endHeight has
+// already been validated (e.g., by checkEndHeight) or is server-resolved
+// (e.g., from currentHeight+1 on the /latest route).
+func (s *server) serveHeightBasedImport(w http.ResponseWriter,
+	subDir, fileNamePattern string, entriesPerFile int32,
+	serializeCb func(w io.Writer, startIndex, endIndex int32) error,
+	fileType byte, endHeight int64) {
+
 	// We allow the end height to be equal to the current height, which
 	// we serve content from memory. In that case we mark the whole file as
 	// short-term cacheable only.
 	cache := maxAgeMemory
 
-	// We also check that we don't need to server partial content from
-	// files, as that would make things a bit more tricky.
-	maxCacheFileEndHeight := int64(
-		(s.headerFiles.currentHeight.Load() / entriesPerFile) *
-			entriesPerFile,
-	)
+	// The cache-tier choice gates on whether every byte in the response
+	// has already been written to a sealed file. That's
+	// lastSealedHeight + 1 (the smallest endHeight that's fully covered by
+	// on-disk files). Using currentHeight here would be wrong: with reorg-
+	// safe sealing, a file boundary at or below currentHeight isn't
+	// guaranteed to be on disk yet, and marking a memory-served (still
+	// mutable) response as long-lived would re-create the very bug that
+	// motivated reorg-safe sealing.
+	lastSealedBoundary := s.headerFiles.lastSealedHeight.Load() + 1
 
 	// We don't want to return partial files. So for any range that can be
 	// served only from files (i.e. up to the last complete cache file), we
 	// require the end height to be a multiple of the entries per file.
-	if endHeight <= maxCacheFileEndHeight {
+	if endHeight <= int64(lastSealedBoundary) {
 		// We're in the file-only range, so we can set the cache
 		// duration to disk cache time.
 		cache = maxAgeDisk
 
 		// Make sure we'll be able to serve a full cache file.
 		if endHeight%int64(entriesPerFile) != 0 {
-			err = fmt.Errorf("invalid end height %d, must be a "+
+			err := fmt.Errorf("invalid end height %d, must be a "+
 				"multiple of %d", endHeight, entriesPerFile)
 			sendError(w, status400, err)
 			return
@@ -466,8 +556,16 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 		}
 
 		if err := streamFile(w, fileName); err != nil {
-			log.Errorf("Error while streaming file: %v", err)
-			sendError(w, status500, err)
+			// Response headers are already on the wire and we've
+			// streamed an unknown number of bytes. Continuing the
+			// loop would append the next file's bytes after a
+			// truncated current file, producing a corrupt stream
+			// that decodes as misaligned headers — exactly the
+			// bug that motivated reorg-safe sealing on the
+			// producer side. Just log and bail.
+			log.Errorf("Error while streaming file %s: %v",
+				fileName, err)
+			return
 		}
 	}
 
@@ -480,8 +578,11 @@ func (s *server) heightBasedImportRequestHandler(w http.ResponseWriter,
 	}
 
 	// The requested end height goes over what's in files, so we need to
-	// stream the remaining headers from memory.
-	err = serializeCb(w, int32(lastHeight), int32(endHeight))
+	// stream the remaining headers from memory. endHeight is exclusive
+	// (matches the file path's behavior of stopping the loop when
+	// lastHeight == endHeight without writing one more entry), so the
+	// inclusive last index here is endHeight - 1.
+	err := serializeCb(w, int32(lastHeight), int32(endHeight)-1)
 	if err != nil {
 		log.Errorf("Error serializing: %v", err)
 	}
@@ -722,7 +823,13 @@ func (s *server) checkStartHeight(processor blockProcessor, height int64,
 func (s *server) checkEndHeight(processor blockProcessor, height int64,
 	entriesPerFile int32) error {
 
-	if int32(height) > processor.getCurrentHeight() {
+	// endHeight is exclusive, so the maximum valid value is
+	// currentHeight + 1 — that yields a response containing every header
+	// up to and including the current tip. Rejecting at strictly greater
+	// than currentHeight would make the tip block unreachable through the
+	// numeric import URL (the convenience /latest route already uses
+	// currentHeight + 1 internally).
+	if int32(height) > processor.getCurrentHeight()+1 {
 		return fmt.Errorf("end height %d is greater than current "+
 			"height %d", height, processor.getCurrentHeight())
 	}
@@ -782,22 +889,31 @@ func addCacheHeaders(w http.ResponseWriter, maxAge time.Duration) {
 	// A max-age of 0 means no caching at all, as something is not safe
 	// to cache yet.
 	if maxAge == 0 {
-		w.Header().Add(HeaderCache, "no-cache")
+		w.Header().Set(HeaderCache, "no-cache")
 
 		return
 	}
 
-	// Make caching even more aggressive if the content is immutable.
+	secs := int64(maxAge.Seconds())
+
+	// The disk tier serves bytes that are durably on disk past the
+	// reorg-safe depth. They effectively never change — but "effectively"
+	// is not "never" (a reorg deeper than --reorg-safe-depth would
+	// invalidate them), so we deliberately do NOT advertise `immutable`.
+	// Instead we let intermediaries serve a stale response while they
+	// revalidate in the background, so even browsers that already cached
+	// bad bytes can self-heal after a manual CDN purge.
 	if maxAge >= maxAgeDisk {
-		w.Header().Add(
-			HeaderCache, fmt.Sprintf("public, max-age=%d, "+
-				"immutable", int64(maxAge.Seconds())),
-		)
+		w.Header().Set(HeaderCache, fmt.Sprintf(
+			"public, max-age=%d, stale-while-revalidate=86400",
+			secs,
+		))
+
+		return
 	}
 
-	w.Header().Add(
-		HeaderCache, fmt.Sprintf("public, max-age=%d",
-			int64(maxAge.Seconds())),
+	w.Header().Set(
+		HeaderCache, fmt.Sprintf("public, max-age=%d", secs),
 	)
 }
 

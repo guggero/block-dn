@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/stretchr/testify/require"
 )
 
@@ -61,4 +62,67 @@ func TestHeightToHashCache(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, expectedHashStr, h.String())
 	}
+}
+
+// TestHeightToHashCacheInvalidate exercises the invalidate path in
+// isolation — no backend required, since invalidate only mutates in-memory
+// state. The semantic under test: after invalidate(N), heights < N stay
+// cached, heights >= N are gone, and bestHeight is reset to N-1 so the
+// next getBlockHash for a height in the dropped range goes back to
+// bitcoind.
+func TestHeightToHashCacheInvalidate(t *testing.T) {
+	c := newH2HCache(nil)
+	for i := range int32(101) {
+		c.heightToHash[i] = chainhash.Hash{byte(i)}
+	}
+	c.bestHeight.Store(100)
+
+	c.invalidate(50)
+
+	require.EqualValues(t, 49, c.bestHeight.Load())
+	for i := range int32(50) {
+		_, ok := c.heightToHash[i]
+		require.Truef(t, ok, "expected height %d still cached", i)
+	}
+	for i := int32(50); i <= 100; i++ {
+		_, ok := c.heightToHash[i]
+		require.Falsef(t, ok, "expected height %d cleared", i)
+	}
+}
+
+// TestHeightToHashCacheInvalidateEmpty covers the no-op edge case:
+// invalidating at a height above bestHeight must leave the cache and
+// bestHeight semantics consistent (bestHeight = fromHeight-1, even though
+// we evicted nothing).
+func TestHeightToHashCacheInvalidateAboveBest(t *testing.T) {
+	c := newH2HCache(nil)
+	for i := range int32(11) {
+		c.heightToHash[i] = chainhash.Hash{byte(i)}
+	}
+	c.bestHeight.Store(10)
+
+	c.invalidate(50)
+
+	// No entries cleared (50 > bestHeight=10), but bestHeight was reset
+	// to fromHeight-1=49, which is consistent with the contract: the
+	// caller asserted everything from fromHeight onward is unknown.
+	require.EqualValues(t, 49, c.bestHeight.Load())
+	for i := range int32(11) {
+		_, ok := c.heightToHash[i]
+		require.Truef(t, ok, "expected height %d still cached", i)
+	}
+}
+
+// TestHeightToHashCacheInvalidateFromZero covers the full-wipe case.
+func TestHeightToHashCacheInvalidateFromZero(t *testing.T) {
+	c := newH2HCache(nil)
+	for i := range int32(11) {
+		c.heightToHash[i] = chainhash.Hash{byte(i)}
+	}
+	c.bestHeight.Store(10)
+
+	c.invalidate(0)
+
+	require.EqualValues(t, -1, c.bestHeight.Load())
+	require.Empty(t, c.heightToHash)
 }

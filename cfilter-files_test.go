@@ -32,7 +32,8 @@ func TestCFilterFilesUpdate(t *testing.T) {
 	quit := make(chan struct{})
 	h2hCache := newH2HCache(backend)
 	hf := newCFilterFiles(
-		filtersPerFile, backend, quit, dataDir, &testParams, h2hCache,
+		filtersPerFile, testReOrgSafeDepth, backend, quit, dataDir,
+		&testParams, h2hCache,
 	)
 
 	var wg sync.WaitGroup
@@ -65,7 +66,8 @@ func TestCFilterFilesUpdate(t *testing.T) {
 
 	quit = make(chan struct{})
 	hf = newCFilterFiles(
-		filtersPerFile, backend, quit, dataDir, &testParams, h2hCache,
+		filtersPerFile, testReOrgSafeDepth, backend, quit, dataDir,
+		&testParams, h2hCache,
 	)
 
 	// Wait for the final blocks to be written.
