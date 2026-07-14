@@ -181,6 +181,38 @@ func (c *cFilterFiles) serializeFilters(w io.Writer, startIndex,
 	return c.serializeFiltersLocked(w, startIndex, endIndex)
 }
 
+// filterAtHeight returns the raw filter bytes for the given height if it is
+// still in the in-memory (unsealed) tail, or false if it has already been
+// pruned after sealing to disk.
+func (c *cFilterFiles) filterAtHeight(height int32) ([]byte, bool) {
+	c.RLock()
+	defer c.RUnlock()
+
+	filter, ok := c.filters[height]
+	return filter, ok
+}
+
+// filtersSize returns the exact serialized size of the var-int prefixed
+// filters in [startIndex, endIndex], or false if any of them is missing from
+// the in-memory tail.
+func (c *cFilterFiles) filtersSize(startIndex, endIndex int32) (int64, bool) {
+	c.RLock()
+	defer c.RUnlock()
+
+	var total int64
+	for j := startIndex; j <= endIndex; j++ {
+		filter, ok := c.filters[j]
+		if !ok {
+			return 0, false
+		}
+
+		total += int64(wire.VarIntSerializeSize(uint64(len(filter)))) +
+			int64(len(filter))
+	}
+
+	return total, true
+}
+
 func (c *cFilterFiles) serializeFiltersLocked(w io.Writer, startIndex,
 	endIndex int32) error {
 

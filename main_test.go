@@ -229,6 +229,14 @@ var testCases = []struct {
 		fn:   testFilterHeadersImportLatest,
 	},
 	{
+		name: "filter-single",
+		fn:   testFilterSingle,
+	},
+	{
+		name: "range-requests",
+		fn:   testRangeRequests,
+	},
+	{
 		name: "sp-tweak-data",
 		fn:   testSPTweakData,
 	},
@@ -1187,4 +1195,120 @@ func waitBackendSync(t *testing.T, backend *rpcclient.Client,
 		return nil
 	}, syncTimeout)
 	require.NoError(t, err)
+}
+
+// fetchWithHeaders performs a GET with extra request headers and returns the
+// body, response headers and status code.
+func (ctx *testContext) fetchWithHeaders(t *testing.T, endpoint string,
+	reqHeaders map[string]string) ([]byte, http.Header, int) {
+
+	url := fmt.Sprintf("http://%s/%s", ctx.server.listenAddr, endpoint)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	require.NoError(t, err)
+	for k, v := range reqHeaders {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+
+	defer func() {
+		require.NoError(t, resp.Body.Close())
+	}()
+
+	body := new(bytes.Buffer)
+	_, err = body.ReadFrom(resp.Body)
+	require.NoError(t, err)
+
+	return body.Bytes(), resp.Header, resp.StatusCode
+}
+
+// expectedFilter fetches the BIP158 basic filter for the given height straight
+// from the backend, as the expected value for endpoint assertions.
+func (ctx *testContext) expectedFilter(t *testing.T, height int64) []byte {
+	blockHash, err := ctx.backend.GetBlockHash(height)
+	require.NoError(t, err)
+
+	filter, err := ctx.backend.GetBlockFilter(*blockHash, &filterBasic)
+	require.NoError(t, err)
+
+	filterBytes, err := hex.DecodeString(filter.Filter)
+	require.NoError(t, err)
+
+	return filterBytes
+}
+
+// testFilterSingle checks the /filters/single/{height} endpoint: the sealed
+// (backend-served, disk cache tier) path, the in-memory tail path and the
+// out-of-bounds error.
+func testFilterSingle(t *testing.T, ctx *testContext) {
+	// Height 100 is long sealed (the first filter file covers heights
+	// 0..1999 and more than 2000+reorg-safe-depth blocks were mined), so
+	// it must come back with the disk cache tier.
+	body, headers, status := ctx.fetchBinaryWithStatus(
+		t, "filters/single/100",
+	)
+	require.Equal(t, 200, status)
+	require.Equal(t, ctx.expectedFilter(t, 100), body)
+	require.Equal(t, cacheDisk, headers.Get(HeaderCache))
+	require.Equal(t, "*", headers.Get(HeaderCORS))
+	require.Equal(
+		t, strconv.Itoa(len(body)), headers.Get("Content-Length"),
+	)
+
+	// The current tip is still in the in-memory tail, so it must be
+	// served at the memory tier.
+	tipHeight, _ := ctx.bestBlock(t)
+	body, headers, status = ctx.fetchBinaryWithStatus(
+		t, fmt.Sprintf("filters/single/%d", tipHeight),
+	)
+	require.Equal(t, 200, status)
+	require.Equal(t, ctx.expectedFilter(t, int64(tipHeight)), body)
+	require.Equal(t, cacheMemory, headers.Get(HeaderCache))
+
+	// A height above the tip is rejected.
+	_, _, status = ctx.fetchBinaryWithStatus(
+		t, fmt.Sprintf("filters/single/%d", tipHeight+1),
+	)
+	require.Equal(t, 400, status)
+}
+
+// testRangeRequests checks that sealed files are served with Content-Length
+// and support HTTP range requests, and that memory-tier responses of
+// fixed-size entries announce an exact Content-Length.
+func testRangeRequests(t *testing.T, ctx *testContext) {
+	// A sealed header file has a known exact size.
+	fullSize := DefaultRegtestHeadersPerFile * headerSize
+	body, headers := ctx.fetchBinary(t, "headers/0")
+	require.Len(t, body, fullSize)
+	require.Equal(
+		t, strconv.Itoa(fullSize), headers.Get("Content-Length"),
+	)
+	require.Equal(t, "bytes", headers.Get("Accept-Ranges"))
+	require.NotEmpty(t, headers.Get("Last-Modified"))
+
+	// A range request for the second header must return exactly that
+	// header with a 206 status.
+	rangeBody, rangeHeaders, status := ctx.fetchWithHeaders(
+		t, "headers/0", map[string]string{"Range": "bytes=80-159"},
+	)
+	require.Equal(t, http.StatusPartialContent, status)
+	require.Len(t, rangeBody, 80)
+	require.Equal(t, body[80:160], rangeBody)
+	require.Equal(t, "80", rangeHeaders.Get("Content-Length"))
+
+	// The memory-tier headers response (unsealed tail) announces its
+	// exact size too: entries are fixed-size 80-byte headers.
+	tipHeight, _ := ctx.bestBlock(t)
+	const startHeight = DefaultRegtestHeadersPerFile
+	tailBody, tailHeaders := ctx.fetchBinary(
+		t, fmt.Sprintf("headers/%d", startHeight),
+	)
+	expectedLen := (int(tipHeight) - startHeight + 1) * headerSize
+	require.Len(t, tailBody, expectedLen)
+	require.Equal(
+		t, strconv.Itoa(expectedLen),
+		tailHeaders.Get("Content-Length"),
+	)
+	require.Equal(t, cacheMemory, tailHeaders.Get(HeaderCache))
 }
