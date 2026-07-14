@@ -141,6 +141,10 @@ func (s *server) createRouter() *mux.Router {
 	)
 	router.HandleFunc("/filters/{height:[0-9]+}", s.filtersRequestHandler)
 	router.HandleFunc(
+		"/filters/single/{height:[0-9]+}",
+		s.filterSingleRequestHandler,
+	)
+	router.HandleFunc(
 		"/sp/tweak-data/{height:[0-9]+}",
 		s.spTweakDataRequestHandler,
 	)
@@ -200,6 +204,8 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	status := &Status{
+		Version:               version,
+		Commit:                Commit,
 		ChainGenesisHash:      s.chainParams.GenesisHash.String(),
 		ChainName:             s.chainParams.Name,
 		BestBlockHeight:       bestHeight,
@@ -220,7 +226,7 @@ func (s *server) headersRequestHandler(w http.ResponseWriter, r *http.Request) {
 	s.heightBasedRequestHandler(
 		w, r, HeaderFileDir, HeaderFileNamePattern,
 		int64(s.headersPerFile), s.headerFiles.serializeHeaders,
-		s.headerFiles,
+		s.headerFiles.headersSize, s.headerFiles,
 	)
 }
 
@@ -254,7 +260,7 @@ func (s *server) filterHeadersRequestHandler(w http.ResponseWriter,
 	s.heightBasedRequestHandler(
 		w, r, HeaderFileDir, FilterHeaderFileNamePattern,
 		int64(s.headersPerFile), s.headerFiles.serializeFilterHeaders,
-		s.headerFiles,
+		s.headerFiles.filterHeadersSize, s.headerFiles,
 	)
 }
 
@@ -284,8 +290,75 @@ func (s *server) filtersRequestHandler(w http.ResponseWriter, r *http.Request) {
 	s.heightBasedRequestHandler(
 		w, r, FilterFileDir, FilterFileNamePattern,
 		int64(s.filtersPerFile), s.cFilterFiles.serializeFilters,
-		s.cFilterFiles,
+		s.cFilterFiles.filtersSize, s.cFilterFiles,
 	)
+}
+
+// filterSingleRequestHandler serves /filters/single/{height}: the raw BIP158
+// basic filter of a single block, without a var-int length prefix (the length
+// is the Content-Length). The batch /filters/{height} route only accepts
+// file-aligned start heights, which would force a tip-following client to
+// re-download the whole unsealed tail file for every new block; this endpoint
+// is the cheap alternative. It works in light mode too, since it's backed by
+// the node's own filter index rather than the on-disk files.
+func (s *server) filterSingleRequestHandler(w http.ResponseWriter,
+	r *http.Request) {
+
+	height, err := parseRequestParamInt64(r, "height")
+	if err != nil {
+		sendError(w, status400, err)
+		return
+	}
+
+	// Serve from the in-memory tail if this height hasn't been sealed to
+	// disk yet. This avoids a backend round trip for the hot tip range.
+	if !s.lightMode && s.cFilterFiles.isStartupComplete() {
+		current := int64(s.cFilterFiles.getCurrentHeight())
+		if height > current {
+			sendError(w, status400, fmt.Errorf("start height %d "+
+				"is greater than current height %d", height,
+				current))
+			return
+		}
+
+		if filter, ok := s.cFilterFiles.filterAtHeight(
+			int32(height),
+		); ok {
+			sendRawBytes(w, filter, maxAgeMemory)
+			return
+		}
+	}
+
+	// The height is in the sealed range (or we're in light mode), so ask
+	// the backend's filter index directly. Sealed heights are safe to
+	// cache at the disk tier; anything within the reorg window stays at
+	// the memory tier.
+	hash, err := s.h2hCache.getBlockHash(int32(height))
+	if err != nil {
+		sendError(w, status400, fmt.Errorf("invalid height"))
+		return
+	}
+
+	filter, err := s.chain.GetBlockFilter(*hash, &filterBasic)
+	if err != nil {
+		sendError(w, status500, err)
+		return
+	}
+
+	filterBytes, err := hex.DecodeString(filter.Filter)
+	if err != nil {
+		sendError(w, status500, err)
+		return
+	}
+
+	maxAge := maxAgeMemory
+	if !s.lightMode &&
+		int64(s.cFilterFiles.getLastSealedHeight()) >= height {
+
+		maxAge = maxAgeDisk
+	}
+
+	sendRawBytes(w, filterBytes, maxAge)
 }
 
 func (s *server) spTweakDataRequestHandler(w http.ResponseWriter,
@@ -296,10 +369,12 @@ func (s *server) spTweakDataRequestHandler(w http.ResponseWriter,
 		return
 	}
 
+	// SP tweak data is variable-size JSON, so no size callback: computing
+	// it would mean serializing twice.
 	s.heightBasedRequestHandler(
 		w, r, SPTweakFileDir, SPTweakFileNamePattern,
 		int64(s.spTweaksPerFile), s.spTweakFiles.serializeSPTweakData,
-		s.spTweakFiles,
+		nil, s.spTweakFiles,
 	)
 }
 
@@ -346,6 +421,7 @@ func (s *server) estimateFeeRequestHandler(w http.ResponseWriter,
 func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 	r *http.Request, subDir, fileNamePattern string, entriesPerFile int64,
 	serializeCb func(w io.Writer, startIndex, endIndex int32) error,
+	sizeCb func(startIndex, endIndex int32) (int64, bool),
 	processor blockProcessor) {
 
 	// These kinds of requests aren't available in light mode.
@@ -379,13 +455,13 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 	if fileExists(fileName) {
 		addCorsHeaders(w)
 		addCacheHeaders(w, maxAgeDisk)
-		w.WriteHeader(http.StatusOK)
-		if err := streamFile(w, fileName); err != nil {
-			// We've already written response headers and possibly
-			// part of the body. We can't change status now;
-			// log and stop.
-			log.Errorf("Error while streaming file: %v", err)
-		}
+
+		// Serving the sealed file through http.ServeContent gives
+		// clients Content-Length, Last-Modified/If-Modified-Since and
+		// HTTP range requests — the latter lets a browser client
+		// resume a large filter file download instead of restarting
+		// it.
+		serveFile(w, r, fileName)
 
 		return
 	}
@@ -399,11 +475,21 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 	}
 
 	// The requested start height wasn't yet in a file, so we need to
-	// stream the headers from memory.
+	// stream the headers from memory. The exact response size is known
+	// for fixed-size entries (and cheaply computable for filters), so
+	// announce it where possible to let clients detect truncation.
+	endHeight := processor.getCurrentHeight()
 	addCorsHeaders(w)
 	addCacheHeaders(w, maxAgeMemory)
+	if sizeCb != nil {
+		if size, ok := sizeCb(int32(startHeight), endHeight); ok {
+			w.Header().Set(
+				"Content-Length", strconv.FormatInt(size, 10),
+			)
+		}
+	}
 	w.WriteHeader(http.StatusOK)
-	err = serializeCb(w, int32(startHeight), processor.getCurrentHeight())
+	err = serializeCb(w, int32(startHeight), endHeight)
 	if err != nil {
 		log.Errorf("Error serializing: %v", err)
 	}
@@ -631,7 +717,7 @@ func (s *server) blockSpentTxOutsRequestHandler(w http.ResponseWriter,
 		s.chainCfg.Host, blockHash.String(), format)
 
 	client := &http.Client{
-		Timeout: defaultTimeout,
+		Timeout: backendRequestTimeout,
 	}
 
 	req, err := http.NewRequestWithContext(
@@ -767,7 +853,7 @@ func (s *server) utxoRequestHandler(w http.ResponseWriter, r *http.Request) {
 		s.chainCfg.Host, mempool, txHash.String(), vOut, format)
 
 	client := &http.Client{
-		Timeout: defaultTimeout,
+		Timeout: backendRequestTimeout,
 	}
 
 	req, err := http.NewRequestWithContext(
@@ -867,6 +953,10 @@ func sendBinary(w http.ResponseWriter, v serializable, maxAge time.Duration) {
 func sendRawBytes(w http.ResponseWriter, payload []byte, maxAge time.Duration) {
 	addCacheHeaders(w, maxAge)
 	addCorsHeaders(w)
+
+	// The payload is fully known here, so announce its length; explicitly
+	// calling WriteHeader below disables Go's automatic inference.
+	w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
 	w.WriteHeader(http.StatusOK)
 	_, err := w.Write(payload)
 	if err != nil {
@@ -1000,4 +1090,34 @@ func streamFile(w io.Writer, fileName string) error {
 
 	_, err = io.Copy(w, f)
 	return err
+}
+
+// serveFile serves a single sealed file via http.ServeContent, which handles
+// Content-Length, Last-Modified/If-Modified-Since and range requests. Unlike
+// streamFile it must own the status code (206 for ranges), so callers must
+// not call WriteHeader themselves.
+func serveFile(w http.ResponseWriter, r *http.Request, fileName string) {
+	f, err := os.Open(fileName)
+	if err != nil {
+		log.Errorf("Error opening file %s: %v", fileName, err)
+		sendError(w, status500, fmt.Errorf("error reading file"))
+		return
+	}
+
+	defer func(f *os.File) {
+		err := f.Close()
+		if err != nil {
+			log.Errorf("Error closing file %s: %v", fileName, err)
+		}
+	}(f)
+
+	stat, err := f.Stat()
+	if err != nil {
+		log.Errorf("Error getting file info %s: %v", fileName, err)
+		sendError(w, status500, fmt.Errorf("error reading file"))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	http.ServeContent(w, r, stat.Name(), stat.ModTime(), f)
 }

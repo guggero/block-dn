@@ -3,6 +3,8 @@ package main
 import "fmt"
 
 type Status struct {
+	Version               string `json:"version"`
+	Commit                string `json:"commit"`
 	ChainGenesisHash      string `json:"chain_genesis_hash"`
 	ChainName             string `json:"chain_name"`
 	BestBlockHeight       int32  `json:"best_block_height"`

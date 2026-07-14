@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/rpcclient"
@@ -14,7 +15,7 @@ import (
 )
 
 const (
-	version = "1.3.2"
+	version = "1.3.3"
 
 	defaultListenPort = 8080
 
@@ -53,6 +54,9 @@ type mainCommand struct {
 	listenAddr string
 
 	reOrgSafeDepth uint32
+
+	readTimeout  time.Duration
+	writeTimeout time.Duration
 
 	bitcoindConfig *rpcclient.ConnConfig
 	cmd            *cobra.Command
@@ -148,7 +152,8 @@ func main() {
 				cc.listenAddr, cc.bitcoindConfig, chainParams,
 				cc.reOrgSafeDepth, headersPerFile,
 				filtersPerFile, spTweaksPerFile,
-				cc.prevOutCacheSizeMiB,
+				cc.prevOutCacheSizeMiB, cc.readTimeout,
+				cc.writeTimeout,
 			)
 			err := server.start()
 			if err != nil {
@@ -255,6 +260,16 @@ func main() {
 		defaultMainnetReOrgSafeDepth,
 		"The number of blocks to wait before considering a block "+
 			"safe from re-orgs",
+	)
+	cc.cmd.PersistentFlags().DurationVar(
+		&cc.readTimeout, "read-timeout", defaultReadTimeout,
+		"The maximum duration for reading an HTTP request",
+	)
+	cc.cmd.PersistentFlags().DurationVar(
+		&cc.writeTimeout, "write-timeout", defaultWriteTimeout,
+		"The maximum duration for writing an HTTP response; must be "+
+			"generous enough for the largest filter file to be "+
+			"streamed to a slow direct (non-CDN) client",
 	)
 
 	if err := cc.cmd.Execute(); err != nil {

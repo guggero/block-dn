@@ -254,6 +254,24 @@
                 </td>
             </tr>
             <tr>
+                <td><code>/filters/single/&lt;block&gt;</code></td>
+                <td>
+                    Returns the raw compact filter (BIP-0158 basic filter) of
+                    a single block, without a length prefix (the length is the
+                    <code>Content-Length</code>). Useful for tip-following
+                    clients that would otherwise need to re-download the whole
+                    unsealed batch file for every new block. Blocks that are
+                    already sealed to disk are long-cached (disk tier), blocks
+                    within the re-org window are short-cached (memory tier).
+                    Also available in light mode.
+                </td>
+                <td>
+                    <a href="https://block-dn.org/filters/single/802123">
+                        block-dn.org/filters/single/802123
+                    </a>
+                </td>
+            </tr>
+            <tr>
                 <td><code>/sp/tweak-data/&lt;start_block&gt;</code></td>
                 <td>
                     Returns a JSON file containing Silent Payment tweak data

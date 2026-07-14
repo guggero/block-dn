@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -176,5 +177,88 @@ func TestCheckImportPreconditions(t *testing.T) {
 		// Default Code is 200 when WriteHeader hasn't been called.
 		require.Equal(t, 200, rec.Code)
 		require.Empty(t, rec.Body.String())
+	})
+}
+
+// TestSizeHelpers checks the exact-size computations used for the memory-tier
+// Content-Length header.
+func TestSizeHelpers(t *testing.T) {
+	hf := &headerFiles{}
+
+	size, ok := hf.headersSize(0, 9)
+	require.True(t, ok)
+	require.EqualValues(t, 10*80, size)
+
+	size, ok = hf.filterHeadersSize(100, 100)
+	require.True(t, ok)
+	require.EqualValues(t, 32, size)
+
+	// An empty range can't be sized.
+	_, ok = hf.headersSize(5, 4)
+	require.False(t, ok)
+
+	cf := &cFilterFiles{
+		filters: map[int32][]byte{
+			0: make([]byte, 10),
+			1: make([]byte, 300),
+		},
+	}
+
+	// 10-byte filter has a 1-byte var-int prefix, the 300-byte one a
+	// 3-byte prefix (0xfd + uint16).
+	size, ok = cf.filtersSize(0, 1)
+	require.True(t, ok)
+	require.EqualValues(t, 1+10+3+300, size)
+
+	// A missing height means the size can't be computed.
+	_, ok = cf.filtersSize(0, 2)
+	require.False(t, ok)
+}
+
+// TestFilterSingleMemoryPath checks the /filters/single/{height} route for
+// heights that are still in the unsealed in-memory tail, including the
+// out-of-bounds rejection. The sealed (backend RPC) path is covered by the
+// bitcoind integration test.
+func TestFilterSingleMemoryPath(t *testing.T) {
+	filterBytes := []byte{0x01, 0x02, 0x03, 0x04}
+
+	cf := &cFilterFiles{
+		filters: map[int32][]byte{5: filterBytes},
+	}
+	cf.startupComplete.Store(true)
+	cf.currentHeight.Store(5)
+	cf.lastSealedHeight.Store(-1)
+
+	s := &server{cFilterFiles: cf}
+	router := s.createRouter()
+
+	t.Run("tail filter served from memory", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(
+			http.MethodGet, "/filters/single/5", nil,
+		)
+		router.ServeHTTP(rec, req)
+
+		require.Equal(t, 200, rec.Code)
+		require.Equal(t, filterBytes, rec.Body.Bytes())
+		require.Equal(t, "4", rec.Header().Get("Content-Length"))
+		require.Equal(
+			t, "public, max-age=60",
+			rec.Header().Get(HeaderCache),
+		)
+		require.Equal(t, "*", rec.Header().Get(HeaderCORS))
+	})
+
+	t.Run("height above tip rejected", func(t *testing.T) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(
+			http.MethodGet, "/filters/single/6", nil,
+		)
+		router.ServeHTTP(rec, req)
+
+		require.Equal(t, 400, rec.Code)
+		require.Contains(
+			t, rec.Body.String(), "greater than current height",
+		)
 	})
 }

@@ -215,6 +215,28 @@ func (h *headerFiles) writeFilterHeaders(fileName string, startIndex,
 	return nil
 }
 
+// headersSize returns the exact serialized size of the block headers in
+// [startIndex, endIndex]: headers are fixed-size, so this is pure arithmetic.
+func (h *headerFiles) headersSize(startIndex, endIndex int32) (int64, bool) {
+	if endIndex < startIndex {
+		return 0, false
+	}
+
+	return int64(endIndex-startIndex+1) * wire.MaxBlockHeaderPayload, true
+}
+
+// filterHeadersSize returns the exact serialized size of the filter headers
+// in [startIndex, endIndex]; each one is a 32-byte hash.
+func (h *headerFiles) filterHeadersSize(startIndex, endIndex int32) (int64,
+	bool) {
+
+	if endIndex < startIndex {
+		return 0, false
+	}
+
+	return int64(endIndex-startIndex+1) * chainhash.HashSize, true
+}
+
 // serializeFilterHeaders writes raw filter headers for [startIndex, endIndex]
 // to w. Acquires the read lock; safe to call from request handlers.
 func (h *headerFiles) serializeFilterHeaders(w io.Writer, startIndex,

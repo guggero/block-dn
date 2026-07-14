@@ -121,6 +121,7 @@ func startReorgTestServer(t *testing.T,
 		unittest.NetParams, params.reOrgSafeDepth,
 		params.headersPerFile, params.filtersPerFile,
 		params.spTweaksPerFile, DefaultPrevOutCacheMiBytes,
+		defaultReadTimeout, defaultWriteTimeout,
 	)
 	ctx := &testContext{
 		miner:   miner,
