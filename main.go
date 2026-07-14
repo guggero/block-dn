@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btclog/v2"
 	"github.com/lightningnetwork/lnd/build"
