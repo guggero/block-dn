@@ -631,7 +631,7 @@ func (s *server) blockSpentTxOutsRequestHandler(w http.ResponseWriter,
 		s.chainCfg.Host, blockHash.String(), format)
 
 	client := &http.Client{
-		Timeout: defaultTimeout,
+		Timeout: backendRequestTimeout,
 	}
 
 	req, err := http.NewRequestWithContext(
@@ -767,7 +767,7 @@ func (s *server) utxoRequestHandler(w http.ResponseWriter, r *http.Request) {
 		s.chainCfg.Host, mempool, txHash.String(), vOut, format)
 
 	client := &http.Client{
-		Timeout: defaultTimeout,
+		Timeout: backendRequestTimeout,
 	}
 
 	req, err := http.NewRequestWithContext(

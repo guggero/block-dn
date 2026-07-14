@@ -992,7 +992,8 @@ func TestBlockDN(t *testing.T) {
 		false, true, dataDir, listenAddr, &backendCfg,
 		unittest.NetParams, 6, DefaultRegtestHeadersPerFile,
 		DefaultRegtestFiltersPerFile, DefaultRegtestSPTweaksPerFile,
-		DefaultPrevOutCacheMiBytes,
+		DefaultPrevOutCacheMiBytes, defaultReadTimeout,
+		defaultWriteTimeout,
 	)
 	ctx := &testContext{
 		miner:   miner,
@@ -1097,7 +1098,7 @@ func newBitcoind(t *testing.T, logdir string,
 			MempoolPollingInterval: pollInterval,
 			RPCBatchInterval:       pollInterval,
 			RPCBatchSize:           1,
-			ZMQReadDeadline:        defaultTimeout,
+			ZMQReadDeadline:        defaultReadTimeout,
 		},
 	}
 

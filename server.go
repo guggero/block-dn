@@ -16,7 +16,21 @@ import (
 )
 
 var (
-	defaultTimeout    = 5 * time.Second
+	// defaultReadTimeout bounds how long reading a request (tiny GETs)
+	// may take.
+	defaultReadTimeout = 5 * time.Second
+
+	// defaultWriteTimeout bounds how long writing a response may take.
+	// The largest files served are ~58 MiB filter files, which a direct
+	// (non-CDN) client on a slow link can easily need more than a few
+	// seconds for, so this is much more generous than the read timeout.
+	// Both are configurable via --read-timeout / --write-timeout.
+	defaultWriteTimeout = 5 * time.Minute
+
+	// backendRequestTimeout bounds proxied REST requests to the local
+	// bitcoind backend.
+	backendRequestTimeout = 5 * time.Second
+
 	blockPollInterval = time.Second
 
 	errServerShutdown = errors.New("server shutting down")
@@ -30,6 +44,8 @@ type server struct {
 	chainCfg         *rpcclient.ConnConfig
 	chainParams      *chaincfg.Params
 	reOrgSafeDepth   uint32
+	readTimeout      time.Duration
+	writeTimeout     time.Duration
 	chain            *rpcclient.Client
 	router           *mux.Router
 	httpServer       *http.Server
@@ -52,7 +68,17 @@ type server struct {
 func newServer(lightMode, indexSPTweakData bool, baseDir, listenAddr string,
 	chainCfg *rpcclient.ConnConfig, chainParams *chaincfg.Params,
 	reOrgSafeDepth uint32, headersPerFile, filtersPerFile,
-	spTweaksPerFile int32, spTweakCacheSizeMiB uint16) *server {
+	spTweaksPerFile int32, spTweakCacheSizeMiB uint16, readTimeout,
+	writeTimeout time.Duration) *server {
+
+	// A zero timeout would disable the protection entirely; fall back to
+	// the defaults instead so misconfiguration fails safe.
+	if readTimeout <= 0 {
+		readTimeout = defaultReadTimeout
+	}
+	if writeTimeout <= 0 {
+		writeTimeout = defaultWriteTimeout
+	}
 
 	s := &server{
 		lightMode:        lightMode,
@@ -62,6 +88,8 @@ func newServer(lightMode, indexSPTweakData bool, baseDir, listenAddr string,
 		chainCfg:         chainCfg,
 		chainParams:      chainParams,
 		reOrgSafeDepth:   reOrgSafeDepth,
+		readTimeout:      readTimeout,
+		writeTimeout:     writeTimeout,
 
 		headersPerFile:      headersPerFile,
 		filtersPerFile:      filtersPerFile,
@@ -136,8 +164,8 @@ func (s *server) start() error {
 	s.httpServer = &http.Server{
 		Addr:         s.listenAddr,
 		Handler:      s.router,
-		WriteTimeout: defaultTimeout,
-		ReadTimeout:  defaultTimeout,
+		WriteTimeout: s.writeTimeout,
+		ReadTimeout:  s.readTimeout,
 	}
 	s.errs.Start()
 
