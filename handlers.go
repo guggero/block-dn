@@ -204,6 +204,8 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	status := &Status{
+		Version:               version,
+		Commit:                Commit,
 		ChainGenesisHash:      s.chainParams.GenesisHash.String(),
 		ChainName:             s.chainParams.Name,
 		BestBlockHeight:       bestHeight,
