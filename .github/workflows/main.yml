@@ -18,7 +18,7 @@ defaults:
     shell: bash
 
 env:
-  GO_VERSION: 1.25.10
+  GO_VERSION: 1.26.5
   LINT_VERSION: v2.6.2
   BITCOIND_VERSION: "31"
 
