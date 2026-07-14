@@ -65,21 +65,24 @@ Usage:
   block-dn [flags]
 
 Flags:
-      --base-dir string           The base directory where the generated files will be stored
-      --bitcoind-host string      The host:port of the bitcoind instance to connect to (default "localhost:8332")
-      --bitcoind-pass string      The RPC password of the bitcoind instance to connect to
-      --bitcoind-user string      The RPC username of the bitcoind instance to connect to
-  -h, --help                      help for block-dn
-      --index-page string         Full path to the index.html that should be used instead of the default one that comes with the project
-      --index-sp-tweak-data       Indicates if the server should index BIP-0352 Silent Payments tweak data that allows light clients to scan the chain for inbound SP more efficiently; this requires every block since the activation of Taproot to be indexed which may take a while
-      --light-mode                Indicates if the server should run in light mode which creates no files on disk and therefore requires zero disk space; but only the status and block endpoints are available in this mode
-      --listen-addr string        The local host:port to listen on (default "localhost:8080")
-      --log-dir string            The log directory where the log file will be written (default "/home/guggero/projects/go/src/github.com/guggero/block-dn")
-      --log-level string          The log level for the logger: debug, info, warn, error, critical (default "info")
-      --regtest                   Indicates if regtest parameters should be used
-      --reorg-safe-depth uint32   The number of blocks to wait before considering a block safe from re-orgs (default 6)
-      --signet                    Indicates if signet parameters should be used
-      --testnet                   Indicates if testnet parameters should be used
-      --testnet4                  Indicates if testnet4 parameters should be used
-  -v, --version                   version for block-dn
+      --base-dir string                  The base directory where the generated files will be stored
+      --bitcoind-host string             The host:port of the bitcoind instance to connect to (default "localhost:8332")
+      --bitcoind-pass string             The RPC password of the bitcoind instance to connect to
+      --bitcoind-user string             The RPC username of the bitcoind instance to connect to
+  -h, --help                             help for block-dn
+      --index-page string                Full path to the index.html that should be used instead of the default one that comes with the project
+      --index-sp-tweak-data              Indicates if the server should index BIP-0352 Silent Payments tweak data that allows light clients to scan the chain for inbound SP more efficiently; this requires every block since the activation of Taproot to be indexed which may take a while
+      --light-mode                       Indicates if the server should run in light mode which creates no files on disk and therefore requires zero disk space; but only the status and block endpoints are available in this mode
+      --listen-addr string               The local host:port to listen on (default "localhost:8080")
+      --log-dir string                   The log directory where the log file will be written (default ".")
+      --log-level string                 The log level for the logger: debug, info, warn, error, critical (default "info")
+      --prev-out-cache-size-mib uint16   The size of the in-memory previous output cache in MiB; this cache is only used if --index-sp-tweak-data is enabled and stores previous outputs of transactions to speed up indexing of SP tweak data (default 1024)
+      --read-timeout duration            The maximum duration for reading an HTTP request (default 5s)
+      --regtest                          Indicates if regtest parameters should be used
+      --reorg-safe-depth uint32          The number of blocks to wait before considering a block safe from re-orgs (default 6)
+      --signet                           Indicates if signet parameters should be used
+      --testnet                          Indicates if testnet parameters should be used
+      --testnet4                         Indicates if testnet4 parameters should be used
+  -v, --version                          version for block-dn
+      --write-timeout duration           The maximum duration for writing an HTTP response; must be generous enough for the largest filter file to be streamed to a slow direct (non-CDN) client (default 5m0s)
 ```
