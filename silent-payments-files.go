@@ -64,9 +64,13 @@ type spTweakFiles struct {
 	blockFetcher *blockPrefetcher
 
 	// numBlocksIndexed counts the blocks indexed since the last stats
-	// log line, which we emit whenever a file is sealed. Only accessed
-	// from the producer goroutine, so no locking is required.
+	// log line, which we emit whenever a file is sealed. Together with
+	// the fetch/compute split below it shows where the indexing time
+	// goes. Only accessed from the producer goroutine, so no locking is
+	// required.
 	numBlocksIndexed int32
+	statsFetchWait   time.Duration
+	statsCompute     time.Duration
 	statsLastReset   time.Time
 
 	// taprootStartHeight is the activation height for the current
@@ -158,16 +162,20 @@ func (s *spTweakFiles) ingest(height int32) error {
 		return nil
 	}
 
+	fetchStart := time.Now()
 	block, err := s.blockFetcher.fetchBlock(height, hash)
 	if err != nil {
 		return fmt.Errorf("error getting block for SP tweak data: %w",
 			err)
 	}
 	s.numBlocksIndexed++
+	s.statsFetchWait += time.Since(fetchStart)
 
+	computeStart := time.Now()
 	if err := s.indexBlockSPTweakData(height, block); err != nil {
 		return fmt.Errorf("error indexing SP tweak data: %w", err)
 	}
+	s.statsCompute += time.Since(computeStart)
 
 	return nil
 }
@@ -183,13 +191,18 @@ func (s *spTweakFiles) writeSealedFile(fileStart, fileEnd int32) error {
 
 	// Log the indexing throughput now that we've written another batch of
 	// tweak data to disk, so the initial catch-up progress can be
-	// observed.
+	// observed. The fetch/compute split shows whether the time goes into
+	// waiting for the backend or into the tweak computation itself.
 	since := time.Since(s.statsLastReset).Seconds()
 	log.Debugf("SP tweak data: indexed %d blocks in %.1fs (%.2f blocks "+
-		"per second)", s.numBlocksIndexed, since,
-		float64(s.numBlocksIndexed)/since)
+		"per second; %.1fs waiting on block fetch, %.1fs computing "+
+		"tweaks)", s.numBlocksIndexed, since,
+		float64(s.numBlocksIndexed)/since,
+		s.statsFetchWait.Seconds(), s.statsCompute.Seconds())
 
 	s.numBlocksIndexed = 0
+	s.statsFetchWait = 0
+	s.statsCompute = 0
 	s.statsLastReset = time.Now()
 
 	return nil
