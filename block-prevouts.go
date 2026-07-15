@@ -42,6 +42,12 @@ const (
 	// corrupt length prefix. A block can't contain more transactions (or
 	// inputs) than its serialized size in bytes.
 	maxSpentTxOutsPerBlock = wire.MaxBlockPayload
+
+	// minSPTweakBackendVersion is the minimum bitcoind version (in the
+	// numeric format reported by getnetworkinfo) we require for indexing
+	// SP tweak data: v30.0 is the first version that serves a block's
+	// spent outputs through the /rest/spenttxouts endpoint.
+	minSPTweakBackendVersion = 300_000
 )
 
 // getBlockScriptPubKey is the subset of the scriptPubKey JSON object of the
@@ -198,6 +204,35 @@ func (f *blockPrevOutFetcher) probeREST() {
 	log.Infof("Using the backend's REST API at %s to fetch blocks and "+
 		"spent outputs", f.restURL)
 	f.useREST = true
+}
+
+// requireREST probes the backend's REST API and returns an error if it isn't
+// available. There is no RPC call that reports which options the backend was
+// started with, so a test call against the REST API is the only way to find
+// out whether it is enabled.
+func (f *blockPrevOutFetcher) requireREST() error {
+	f.probeOnce.Do(f.probeREST)
+
+	if !f.useREST {
+		return fmt.Errorf("the backend's REST API is not reachable "+
+			"at %s; set rest=1 in the bitcoind configuration",
+			f.restURL)
+	}
+
+	return nil
+}
+
+// verifySPTweakBackendVersion returns an error if the given backend version
+// (in the numeric format reported by getnetworkinfo) is too old for indexing
+// SP tweak data.
+func verifySPTweakBackendVersion(version int32) error {
+	if version < minSPTweakBackendVersion {
+		return fmt.Errorf("indexing SP tweak data requires bitcoind "+
+			"v30.0 or later, but the backend reports version %d",
+			version)
+	}
+
+	return nil
 }
 
 // restGet performs a GET request against the given REST path on the backend

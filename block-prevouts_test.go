@@ -113,9 +113,11 @@ func TestBlockPrevOutFetcher(t *testing.T) {
 	}
 
 	// The test harness starts bitcoind with -rest, so the fetcher must
-	// pick the REST fast path.
+	// pick the REST fast path and the REST requirement check must pass.
 	t.Run("REST", func(t *testing.T) {
 		fetcher := newBlockPrevOutFetcher(backend, &backendCfg)
+		require.NoError(t, fetcher.requireREST())
+
 		block, err := fetcher.fetchBlock(&blockHash)
 		require.NoError(t, err)
 		require.True(t, fetcher.useREST)
@@ -123,18 +125,30 @@ func TestBlockPrevOutFetcher(t *testing.T) {
 		requireSameBlock(t, block)
 	})
 
-	// With an unreachable REST endpoint, the fetcher must fall back to
-	// the getblock RPC and still produce the same result.
+	// With an unreachable REST endpoint, the REST requirement check must
+	// fail with an actionable error, while the fetcher itself falls back
+	// to the getblock RPC and still produces the same result.
 	t.Run("RPC fallback", func(t *testing.T) {
 		cfgCopy := backendCfg
 		cfgCopy.Host = "127.0.0.1:1"
 		fetcher := newBlockPrevOutFetcher(backend, &cfgCopy)
+		require.ErrorContains(t, fetcher.requireREST(), "rest=1")
+
 		block, err := fetcher.fetchBlock(&blockHash)
 		require.NoError(t, err)
 		require.False(t, fetcher.useREST)
 
 		requireSameBlock(t, block)
 	})
+}
+
+// TestVerifySPTweakBackendVersion pins the minimum backend version required
+// for indexing SP tweak data.
+func TestVerifySPTweakBackendVersion(t *testing.T) {
+	require.Error(t, verifySPTweakBackendVersion(250_000))
+	require.Error(t, verifySPTweakBackendVersion(299_900))
+	require.NoError(t, verifySPTweakBackendVersion(300_000))
+	require.NoError(t, verifySPTweakBackendVersion(310_100))
 }
 
 // TestGetBlockWithPrevOuts checks that fetching a block through the getblock

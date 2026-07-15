@@ -103,12 +103,39 @@ func newServer(lightMode, indexSPTweakData bool, baseDir, listenAddr string,
 	return s
 }
 
+// checkSPTweakBackend verifies that the connected backend meets the
+// requirements for indexing SP tweak data: bitcoind v30.0 or later with the
+// REST API enabled.
+func (s *server) checkSPTweakBackend(fetcher *blockPrevOutFetcher) error {
+	info, err := s.chain.GetNetworkInfo()
+	if err != nil {
+		return fmt.Errorf("error querying backend version: %w", err)
+	}
+
+	if err := verifySPTweakBackendVersion(info.Version); err != nil {
+		return err
+	}
+
+	return fetcher.requireREST()
+}
+
 func (s *server) start() error {
 	client, err := rpcclient.New(s.chainCfg, nil)
 	if err != nil {
 		return fmt.Errorf("error connecting to bitcoind: %w", err)
 	}
 	s.chain = client
+
+	// Indexing SP tweak data needs the backend's undo data, which is only
+	// served through the REST API of bitcoind v30.0 or later. We verify
+	// both requirements up front, so a misconfigured backend fails the
+	// startup instead of surfacing an error mid-catch-up.
+	blockFetcher := newBlockPrevOutFetcher(s.chain, s.chainCfg)
+	if s.indexSPTweakData && !s.lightMode {
+		if err := s.checkSPTweakBackend(blockFetcher); err != nil {
+			return err
+		}
+	}
 
 	s.h2hCache = newH2HCache(client)
 
@@ -225,8 +252,7 @@ func (s *server) start() error {
 
 	s.spTweakFiles = newSPTweakFiles(
 		s.spTweaksPerFile, int32(s.reOrgSafeDepth), s.chain, s.quit,
-		s.baseDir, s.chainParams, s.h2hCache,
-		newBlockPrevOutFetcher(s.chain, s.chainCfg),
+		s.baseDir, s.chainParams, s.h2hCache, blockFetcher,
 	)
 
 	s.wg.Add(1)

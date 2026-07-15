@@ -71,7 +71,7 @@ Flags:
       --bitcoind-user string      The RPC username of the bitcoind instance to connect to
   -h, --help                      help for block-dn
       --index-page string         Full path to the index.html that should be used instead of the default one that comes with the project
-      --index-sp-tweak-data       Indicates if the server should index BIP-0352 Silent Payments tweak data that allows light clients to scan the chain for inbound SP more efficiently; this requires every block since the activation of Taproot to be indexed which may take a while; requires bitcoind v25.0 or later, and setting rest=1 on bitcoind v30.0 or later speeds up the indexing significantly
+      --index-sp-tweak-data       Indicates if the server should index BIP-0352 Silent Payments tweak data that allows light clients to scan the chain for inbound SP more efficiently; this requires every block since the activation of Taproot to be indexed which may take a while; requires bitcoind v30.0 or later with the REST API enabled (rest=1)
       --light-mode                Indicates if the server should run in light mode which creates no files on disk and therefore requires zero disk space; but only the status and block endpoints are available in this mode
       --listen-addr string        The local host:port to listen on (default "localhost:8080")
       --log-dir string            The log directory where the log file will be written (default ".")

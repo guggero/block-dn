@@ -212,9 +212,8 @@ func main() {
 			"scan the chain for inbound SP more efficiently; "+
 			"this requires every block since the activation of "+
 			"Taproot to be indexed which may take a while; "+
-			"requires bitcoind v25.0 or later, and setting "+
-			"rest=1 on bitcoind v30.0 or later speeds up the "+
-			"indexing significantly",
+			"requires bitcoind v30.0 or later with the REST API "+
+			"enabled (rest=1)",
 	)
 	cc.cmd.PersistentFlags().Uint16Var(
 		&cc.prevOutCacheSizeMiB, "prev-out-cache-size-mib", 1024,
