@@ -184,7 +184,8 @@ func (p *producerBase) updateFiles(numBlocks int32) error {
 }
 
 // updateCacheAndFiles ingests every block in [startBlock, endBlock] via the
-// producer's ingest hook, then seals any files that are now reorg-safe.
+// producer's ingest hook, sealing any files that become reorg-safe along the
+// way.
 func (p *producerBase) updateCacheAndFiles(startBlock, endBlock int32) error {
 	for i := startBlock; i <= endBlock; i++ {
 		select {
@@ -198,8 +199,17 @@ func (p *producerBase) updateCacheAndFiles(startBlock, endBlock int32) error {
 		}
 
 		p.currentHeight.Store(i)
+
+		// Seal after every block instead of once at the end of the
+		// range, so a long initial catch-up persists its progress
+		// incrementally and doesn't accumulate the entire range in
+		// memory. When there's nothing to seal, this returns after a
+		// cheap boundary check.
+		if err := p.sealReadyFiles(); err != nil {
+			return err
+		}
 	}
-	return p.sealReadyFiles()
+	return nil
 }
 
 // sealReadyFiles writes any file whose last height has fallen at least
