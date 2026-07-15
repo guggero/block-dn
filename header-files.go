@@ -97,6 +97,18 @@ func (h *headerFiles) ingest(height int32) error {
 // writeSealedFile writes both the block-header and filter-header files for
 // the just-sealed range to disk.
 func (h *headerFiles) writeSealedFile(fileStart, fileEnd int32) error {
+	// Never seal headers that can't be proven to belong to the current
+	// best chain (see cFilterFiles.writeSealedFile for the rationale).
+	// Block headers self-link via PrevBlock, so verifying the linkage
+	// across the file plus anchoring the last hash at the backend proves
+	// every block header; the filter headers are ingested by the same
+	// producer at the same heights, so a stale height would have been
+	// caught by the same check.
+	if err := h.verifyHeaders(fileStart, fileEnd); err != nil {
+		return fmt.Errorf("refusing to seal headers %d-%d: %w",
+			fileStart, fileEnd, err)
+	}
+
 	headerDir := filepath.Join(h.baseDir, h.subDir)
 
 	headerFileName := fmt.Sprintf(HeaderFileNamePattern, headerDir,
@@ -108,6 +120,47 @@ func (h *headerFiles) writeSealedFile(fileStart, fileEnd int32) error {
 	filterHeaderFileName := fmt.Sprintf(FilterHeaderFileNamePattern,
 		headerDir, fileStart, fileEnd)
 	return h.writeFilterHeaders(filterHeaderFileName, fileStart, fileEnd)
+}
+
+// verifyHeaders proves that the in-memory block headers of
+// [fileStart, fileEnd] form one chain that ends in the block bitcoind
+// currently reports at fileEnd.
+func (h *headerFiles) verifyHeaders(fileStart, fileEnd int32) error {
+	endHash, err := h.chain.GetBlockHash(int64(fileEnd))
+	if err != nil {
+		return fmt.Errorf("error getting block hash at %d: %w",
+			fileEnd, err)
+	}
+
+	h.RLock()
+	defer h.RUnlock()
+
+	var running chainhash.Hash
+	for height := fileStart; height <= fileEnd; height++ {
+		header, ok := h.headers[height]
+		if !ok {
+			return fmt.Errorf("missing header at height %d",
+				height)
+		}
+
+		// The first header of the file has no in-memory predecessor
+		// (the previous file is sealed and pruned); its linkage is
+		// implied by the end anchor of that previous file.
+		if height > fileStart && header.PrevBlock != running {
+			return fmt.Errorf("header at height %d does not "+
+				"link to its predecessor", height)
+		}
+		running = header.BlockHash()
+	}
+
+	if running != *endHash {
+		return fmt.Errorf("header chain of heights %d-%d does not "+
+			"end in the backend's block at %d (got %s, want "+
+			"%s); at least one header belongs to a reorged-away "+
+			"block", fileStart, fileEnd, fileEnd, running, endHash)
+	}
+
+	return nil
 }
 
 // pruneLocked drops headers and filter-headers entries for [start, end].

@@ -62,6 +62,47 @@ type mainCommand struct {
 	cmd            *cobra.Command
 }
 
+// resolveNetwork maps the network selection flags to the chain parameters
+// and per-file entry counts, applying the test-network re-org depth default.
+func (cc *mainCommand) resolveNetwork() (*chaincfg.Params, int32, int32,
+	int32) {
+
+	chainParams := &chaincfg.MainNetParams
+	headersPerFile := int32(DefaultHeadersPerFile)
+	filtersPerFile := int32(DefaultFiltersPerFile)
+	spTweaksPerFile := int32(DefaultSPTweaksPerFile)
+
+	switch {
+	case cc.testnet:
+		chainParams = &chaincfg.TestNet3Params
+
+		// The test networks are more prone to longer re-orgs.
+		if cc.reOrgSafeDepth == defaultMainnetReOrgSafeDepth {
+			cc.reOrgSafeDepth = defaultTestnetReOrgSafeDepth
+		}
+
+	case cc.testnet4:
+		chainParams = &chaincfg.TestNet4Params
+
+		// The test networks are more prone to longer re-orgs.
+		if cc.reOrgSafeDepth == defaultMainnetReOrgSafeDepth {
+			cc.reOrgSafeDepth = defaultTestnetReOrgSafeDepth
+		}
+
+	case cc.signet:
+		chainParams = &chaincfg.SigNetParams
+
+	case cc.regtest:
+		chainParams = &chaincfg.RegressionNetParams
+
+		headersPerFile = DefaultRegtestHeadersPerFile
+		filtersPerFile = DefaultRegtestFiltersPerFile
+		spTweaksPerFile = DefaultRegtestSPTweaksPerFile
+	}
+
+	return chainParams, headersPerFile, filtersPerFile, spTweaksPerFile
+}
+
 func main() {
 	workDir, err := os.Getwd()
 	if err != nil {
@@ -84,46 +125,8 @@ func main() {
 		Long:    ``,
 		Version: fmt.Sprintf("v%s, commit %s", version, Commit),
 		Run: func(_ *cobra.Command, _ []string) {
-			chainParams := &chaincfg.MainNetParams
-			headersPerFile := int32(DefaultHeadersPerFile)
-			filtersPerFile := int32(DefaultFiltersPerFile)
-			spTweaksPerFile := int32(DefaultSPTweaksPerFile)
-
-			switch {
-			case cc.testnet:
-				chainParams = &chaincfg.TestNet3Params
-
-				// The test networks are more prone to longer
-				// re-orgs.
-				if cc.reOrgSafeDepth ==
-					defaultMainnetReOrgSafeDepth {
-
-					cc.reOrgSafeDepth =
-						defaultTestnetReOrgSafeDepth
-				}
-
-			case cc.testnet4:
-				chainParams = &chaincfg.TestNet4Params
-
-				// The test networks are more prone to longer
-				// re-orgs.
-				if cc.reOrgSafeDepth ==
-					defaultMainnetReOrgSafeDepth {
-
-					cc.reOrgSafeDepth =
-						defaultTestnetReOrgSafeDepth
-				}
-
-			case cc.signet:
-				chainParams = &chaincfg.SigNetParams
-
-			case cc.regtest:
-				chainParams = &chaincfg.RegressionNetParams
-
-				headersPerFile = DefaultRegtestHeadersPerFile
-				filtersPerFile = DefaultRegtestFiltersPerFile
-				spTweaksPerFile = DefaultRegtestSPTweaksPerFile
-			}
+			chainParams, headersPerFile, filtersPerFile,
+				spTweaksPerFile := cc.resolveNetwork()
 
 			setupLogging(cc.logDir, cc.logLevel)
 			log.Infof("block-dn version v%s commit %s", version,
@@ -273,6 +276,8 @@ func main() {
 			"generous enough for the largest filter file to be "+
 			"streamed to a slow direct (non-CDN) client",
 	)
+
+	cc.cmd.AddCommand(newVerifyCommand(cc))
 
 	if err := cc.cmd.Execute(); err != nil {
 		fmt.Printf("Error: %v", err)

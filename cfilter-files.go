@@ -124,10 +124,83 @@ func (c *cFilterFiles) ingest(height int32) error {
 }
 
 func (c *cFilterFiles) writeSealedFile(fileStart, fileEnd int32) error {
+	// Never seal filters that can't be proven to belong to the current
+	// best chain: a filter ingested from a block that was reorged away
+	// moments later would otherwise end up in an "immutable" file (and a
+	// year-long CDN cache). Failing the seal is loud and safe — the
+	// operator restarts, the unsealed range is re-ingested from scratch
+	// and sealing is retried with clean data.
+	if err := c.verifyFilters(fileStart, fileEnd); err != nil {
+		return fmt.Errorf("refusing to seal filters %d-%d: %w",
+			fileStart, fileEnd, err)
+	}
+
 	filterDir := filepath.Join(c.baseDir, c.subDir)
 	filterFileName := fmt.Sprintf(FilterFileNamePattern, filterDir,
 		fileStart, fileEnd)
 	return c.writeFilters(filterFileName, fileStart, fileEnd)
+}
+
+// verifyFilters proves that the in-memory filters of [fileStart, fileEnd]
+// are the filters of the current best chain: the BIP157 commitment chain
+// (filterHeader = dsha(dsha(filter) || prevFilterHeader)) recomputed over
+// our filter bytes, anchored at bitcoind's authoritative filter headers on
+// both ends, must close exactly. A single foreign filter anywhere in the
+// range breaks the chain.
+func (c *cFilterFiles) verifyFilters(fileStart, fileEnd int32) error {
+	authHeader := func(height int32) (*chainhash.Hash, error) {
+		hash, err := c.h2hCache.getBlockHash(height)
+		if err != nil {
+			return nil, fmt.Errorf("error getting block hash at "+
+				"%d: %w", height, err)
+		}
+		filter, err := c.chain.GetBlockFilter(*hash, &filterBasic)
+		if err != nil {
+			return nil, fmt.Errorf("error getting filter at %d: "+
+				"%w", height, err)
+		}
+		return chainhash.NewHashFromStr(filter.Header)
+	}
+
+	// The chain starts at the zero hash for the genesis block.
+	var prevHeader chainhash.Hash
+	if fileStart > 0 {
+		start, err := authHeader(fileStart - 1)
+		if err != nil {
+			return err
+		}
+		prevHeader = *start
+	}
+	wantEnd, err := authHeader(fileEnd)
+	if err != nil {
+		return err
+	}
+
+	c.RLock()
+	defer c.RUnlock()
+
+	for height := fileStart; height <= fileEnd; height++ {
+		filter, ok := c.filters[height]
+		if !ok {
+			return fmt.Errorf("missing filter at height %d",
+				height)
+		}
+
+		filterHash := chainhash.DoubleHashH(filter)
+		prevHeader = chainhash.DoubleHashH(
+			append(filterHash[:], prevHeader[:]...),
+		)
+	}
+
+	if prevHeader != *wantEnd {
+		return fmt.Errorf("filter chain of heights %d-%d does not "+
+			"match the backend's filter header at %d (got %s, "+
+			"want %s); at least one filter belongs to a "+
+			"reorged-away block", fileStart, fileEnd, fileEnd,
+			prevHeader, wantEnd)
+	}
+
+	return nil
 }
 
 func (c *cFilterFiles) pruneLocked(start, end int32) {
