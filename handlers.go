@@ -709,12 +709,8 @@ func (s *server) blockSpentTxOutsRequestHandler(w http.ResponseWriter,
 		format = queryFormat
 	}
 
-	protocol := "https"
-	if s.chainCfg.DisableTLS {
-		protocol = "http"
-	}
-	url := fmt.Sprintf("%s://%s/rest/spenttxouts/%s.%s", protocol,
-		s.chainCfg.Host, blockHash.String(), format)
+	url := fmt.Sprintf("%s/rest/spenttxouts/%s.%s",
+		backendRESTURL(s.chainCfg), blockHash.String(), format)
 
 	client := &http.Client{
 		Timeout: backendRequestTimeout,
@@ -845,12 +841,9 @@ func (s *server) utxoRequestHandler(w http.ResponseWriter, r *http.Request) {
 		format = queryFormat
 	}
 
-	protocol := "https"
-	if s.chainCfg.DisableTLS {
-		protocol = "http"
-	}
-	url := fmt.Sprintf("%s://%s/rest/getutxos/%s%s-%d.%s", protocol,
-		s.chainCfg.Host, mempool, txHash.String(), vOut, format)
+	url := fmt.Sprintf("%s/rest/getutxos/%s%s-%d.%s",
+		backendRESTURL(s.chainCfg), mempool, txHash.String(), vOut,
+		format)
 
 	client := &http.Client{
 		Timeout: backendRequestTimeout,

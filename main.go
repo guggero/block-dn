@@ -152,8 +152,7 @@ func main() {
 				cc.listenAddr, cc.bitcoindConfig, chainParams,
 				cc.reOrgSafeDepth, headersPerFile,
 				filtersPerFile, spTweaksPerFile,
-				cc.prevOutCacheSizeMiB, cc.readTimeout,
-				cc.writeTimeout,
+				cc.readTimeout, cc.writeTimeout,
 			)
 			err := server.start()
 			if err != nil {
@@ -212,15 +211,19 @@ func main() {
 			"Payments tweak data that allows light clients to "+
 			"scan the chain for inbound SP more efficiently; "+
 			"this requires every block since the activation of "+
-			"Taproot to be indexed which may take a while",
+			"Taproot to be indexed which may take a while; "+
+			"requires bitcoind v25.0 or later, and setting "+
+			"rest=1 on bitcoind v30.0 or later speeds up the "+
+			"indexing significantly",
 	)
 	cc.cmd.PersistentFlags().Uint16Var(
-		&cc.prevOutCacheSizeMiB, "prev-out-cache-size-mib",
-		DefaultPrevOutCacheMiBytes, "The size of the in-memory "+
-			"previous output cache in MiB; this cache is only "+
-			"used if --index-sp-tweak-data is enabled and stores "+
-			"previous outputs of transactions to speed up "+
-			"indexing of SP tweak data",
+		&cc.prevOutCacheSizeMiB, "prev-out-cache-size-mib", 1024,
+		"Deprecated, has no effect",
+	)
+	_ = cc.cmd.PersistentFlags().MarkDeprecated(
+		"prev-out-cache-size-mib", "previous outputs are now fetched "+
+			"from bitcoind directly through the getblock RPC, so "+
+			"no cache is needed anymore",
 	)
 	cc.cmd.PersistentFlags().StringVar(
 		&cc.baseDir, "base-dir", "", "The base directory "+

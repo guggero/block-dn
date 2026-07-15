@@ -18,24 +18,13 @@ import (
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/rpcclient"
 	sp "github.com/btcsuite/btcd/silentpayments"
-	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
-	"github.com/lightninglabs/neutrino/cache/lru"
 )
 
 const (
 	DefaultSPTweaksPerFile = 2_000
 
 	DefaultRegtestSPTweaksPerFile = 2_000
-
-	// DefaultPrevOutCacheMiBytes is the default size we allow the Taproot
-	// previous output script cache to grow to. This is a hard limit as
-	// we're using an LRU cache, so once we reach this limit, we will evict
-	// the least recently used entry from the cache for each new entry we
-	// add. We set this to 1GiB by default, to make sure systems with
-	// limited resources can still use the SP tweak data indexing without
-	// running out of memory.
-	DefaultPrevOutCacheMiBytes = 1024
 
 	SPTweakFileDir = "silentpayments"
 
@@ -59,137 +48,6 @@ var (
 	)
 )
 
-// byteCacheEntry is a simple wrapper around a byte slice that implements the
-// cache.Value interface, which allows us to store previous output scripts in
-// the LRU cache.
-type byteCacheEntry []byte
-
-// Size determines how big this entry is in the cache. We need to account for
-// the size of the key (the outpoint) as well, which is 36 bytes (32 for the
-// txid and 4 for the index).
-// nolint:unparam
-func (b byteCacheEntry) Size() (uint64, error) {
-	return uint64(len(b)) + 36, nil
-}
-
-type prevOutCache struct {
-	numBlock   int32
-	numTx      int32
-	numTrTx    int32
-	numTrHit   int32
-	numTxFetch int32
-
-	enabled bool
-
-	lastReset time.Time
-
-	chain *rpcclient.Client
-
-	trPrevOutCache *lru.Cache[wire.OutPoint, byteCacheEntry]
-}
-
-func newPrevOutCache(chain *rpcclient.Client,
-	prevOutCacheSizeMiB uint16) *prevOutCache {
-
-	return &prevOutCache{
-		enabled:   true,
-		chain:     chain,
-		lastReset: time.Now(),
-		trPrevOutCache: lru.NewCache[wire.OutPoint, byteCacheEntry](
-			uint64(prevOutCacheSizeMiB) * 1024 * 1024,
-		),
-	}
-}
-
-func (p *prevOutCache) LogAndReset() {
-	since := time.Since(p.lastReset).Seconds()
-	blockPerSecond := float64(p.numBlock) / since
-
-	log.Tracef("SP PrevOutCache: fetched %d previous txs (%d cache hits) "+
-		"for %d txns (%d with taproot outputs), cache size is %d, "+
-		"%.2f blocks per second", p.numTxFetch, p.numTrHit, p.numTx,
-		p.numTrTx, p.trPrevOutCache.Len(), blockPerSecond)
-
-	// Reset stats.
-	p.numBlock = 0
-	p.numTx = 0
-	p.numTrTx = 0
-	p.numTrHit = 0
-	p.numTxFetch = 0
-
-	p.lastReset = time.Now()
-}
-
-func (p *prevOutCache) Disable() {
-	p.enabled = false
-	p.trPrevOutCache = lru.NewCache[wire.OutPoint, byteCacheEntry](0)
-	p.LogAndReset()
-}
-
-// FetchPreviousOutputScript fetches the previous output's pkScript for the
-// given outpoint.
-func (p *prevOutCache) FetchPreviousOutputScript(op wire.OutPoint) ([]byte,
-	error) {
-
-	// We assume we only visit every transaction once, so each previous
-	// output we fetch is only fetched a single time. Thus, we can delete it
-	// from the cache after fetching it.
-	pkScript, ok := p.trPrevOutCache.LoadAndDelete(op)
-	if ok {
-		p.numTrHit++
-
-		return pkScript, nil
-	}
-
-	tx, err := p.chain.GetRawTransaction(&op.Hash)
-	if err != nil {
-		return nil, fmt.Errorf("error fetching previous transaction: "+
-			"%w", err)
-	}
-
-	p.numTxFetch++
-
-	if int(op.Index) >= len(tx.MsgTx().TxOut) {
-		return nil, fmt.Errorf("output index %d out of range for "+
-			"transaction %s", op.Index, op.Hash.String())
-	}
-
-	pkScript = tx.MsgTx().TxOut[op.Index].PkScript
-	if p.enabled {
-		_, _ = p.trPrevOutCache.Put(op, pkScript)
-	}
-
-	return pkScript, nil
-}
-
-func (p *prevOutCache) AddOutputs(tx *wire.MsgTx) {
-	if !p.enabled {
-		return
-	}
-
-	txHash := tx.TxHash()
-	for txIndex, txOut := range tx.TxOut {
-		if !txscript.IsPayToTaproot(txOut.PkScript) {
-			continue
-		}
-
-		_, _ = p.trPrevOutCache.Put(wire.OutPoint{
-			Hash:  txHash,
-			Index: uint32(txIndex),
-		}, txOut.PkScript)
-	}
-}
-
-func (p *prevOutCache) RemoveInputs(tx *wire.MsgTx) {
-	if !p.enabled {
-		return
-	}
-
-	for _, txIn := range tx.TxIn {
-		p.trPrevOutCache.Delete(txIn.PreviousOutPoint)
-	}
-}
-
 type spTweakFiles struct {
 	producerBase
 
@@ -200,7 +58,15 @@ type spTweakFiles struct {
 	// so we record it explicitly during ingest.
 	heightToHash map[int32]chainhash.Hash
 
-	prevOutCache *prevOutCache
+	// blockFetcher fetches blocks along with the previous output
+	// scripts spent by them.
+	blockFetcher *blockPrevOutFetcher
+
+	// numBlocksIndexed counts the blocks indexed since the last stats
+	// log line, which we emit whenever a file is sealed. Only accessed
+	// from the producer goroutine, so no locking is required.
+	numBlocksIndexed int32
+	statsLastReset   time.Time
 
 	// taprootStartHeight is the activation height for the current
 	// network, or a sentinel when Taproot isn't supported. Set once at
@@ -212,14 +78,15 @@ type spTweakFiles struct {
 func newSPTweakFiles(itemsPerFile, reOrgSafeDepth int32,
 	chain *rpcclient.Client, quit <-chan struct{}, baseDir string,
 	chainParams *chaincfg.Params, h2hCache *heightToHashCache,
-	prevOutCacheSizeMiB uint16) *spTweakFiles {
+	blockFetcher *blockPrevOutFetcher) *spTweakFiles {
 
 	taprootStartHeight, taprootSupported := TaprootActivationHeights[chainParams.Net]
 
 	s := &spTweakFiles{
 		tweakData:          make(map[int32]map[int32]*btcec.PublicKey),
 		heightToHash:       make(map[int32]chainhash.Hash),
-		prevOutCache:       newPrevOutCache(chain, prevOutCacheSizeMiB),
+		blockFetcher:       blockFetcher,
+		statsLastReset:     time.Now(),
 		taprootStartHeight: taprootStartHeight,
 		taprootSupported:   taprootSupported,
 	}
@@ -240,7 +107,6 @@ func newSPTweakFiles(itemsPerFile, reOrgSafeDepth int32,
 			writeSealedFile: s.writeSealedFile,
 			pruneLocked:     s.pruneLocked,
 			cachedHash:      s.cachedHash,
-			afterCatchUp:    s.prevOutCache.Disable,
 		},
 	}
 	s.lastSealedHeight.Store(-1)
@@ -289,12 +155,12 @@ func (s *spTweakFiles) ingest(height int32) error {
 		return nil
 	}
 
-	block, err := s.chain.GetBlock(hash)
+	block, err := s.blockFetcher.fetchBlock(hash)
 	if err != nil {
 		return fmt.Errorf("error getting block for SP tweak data: %w",
 			err)
 	}
-	s.prevOutCache.numBlock++
+	s.numBlocksIndexed++
 
 	if err := s.indexBlockSPTweakData(height, block); err != nil {
 		return fmt.Errorf("error indexing SP tweak data: %w", err)
@@ -312,11 +178,17 @@ func (s *spTweakFiles) writeSealedFile(fileStart, fileEnd int32) error {
 		return err
 	}
 
-	// Log + reset the prev-out cache stats now that we've written
-	// another batch of tweak data to disk. (The cache itself gets
-	// fully released by the afterCatchUp hook once the initial
-	// catch-up completes.)
-	s.prevOutCache.LogAndReset()
+	// Log the indexing throughput now that we've written another batch of
+	// tweak data to disk, so the initial catch-up progress can be
+	// observed.
+	since := time.Since(s.statsLastReset).Seconds()
+	log.Debugf("SP tweak data: indexed %d blocks in %.1fs (%.2f blocks "+
+		"per second)", s.numBlocksIndexed, since,
+		float64(s.numBlocksIndexed)/since)
+
+	s.numBlocksIndexed = 0
+	s.statsLastReset = time.Now()
+
 	return nil
 }
 
@@ -340,39 +212,28 @@ func (s *spTweakFiles) cachedHash(height int32) (chainhash.Hash, bool) {
 // Payments tweak data and store it in the provided index map, keyed by the
 // transaction index within the block.
 func (s *spTweakFiles) indexBlockSPTweakData(height int32,
-	block *wire.MsgBlock) error {
+	block *blockWithPrevOuts) error {
 
-	for txIndex, tx := range block.Transactions {
+	for txIndex, tx := range block.txs {
 		// Skip coinbase transactions, they can't contain Silent Payment
 		// outputs.
 		if blockchain.IsCoinBaseTx(tx) {
 			continue
 		}
 
-		s.prevOutCache.AddOutputs(tx)
-		s.prevOutCache.numTx++
-
-		// Only transactions with Taproot outputs can have Silent
-		// Payments.
-		if !sp.HasTaprootOutputs(tx) {
-			s.prevOutCache.RemoveInputs(tx)
-
-			continue
-		}
-		s.prevOutCache.numTrTx++
-
+		// The tweak calculation resolves the previous output scripts
+		// of all inputs from the data we got alongside the block, and
+		// returns a nil key for transactions that can't contain
+		// Silent Payment outputs.
 		tweakPubKey, err := sp.TransactionTweakData(
-			tx, s.prevOutCache.FetchPreviousOutputScript, log,
+			tx, block.fetchPrevOutScript, log,
 		)
 		if err != nil {
-			s.prevOutCache.RemoveInputs(tx)
-
 			return fmt.Errorf("error calculating SP tweak "+
 				"data for tx index %d in block at height "+
 				"%d: %w", txIndex, height, err)
 		}
 
-		s.prevOutCache.RemoveInputs(tx)
 		if tweakPubKey == nil {
 			continue
 		}

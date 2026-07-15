@@ -18,7 +18,6 @@ require (
 	github.com/btcsuite/btcwallet/walletdb v1.6.0
 	github.com/gorilla/mux v1.8.0
 	github.com/lightninglabs/neutrino v0.18.0
-	github.com/lightninglabs/neutrino/cache v1.1.4
 	github.com/lightningnetwork/lnd v0.20.0-beta.rc4.0.20260520222613-2a4aab892a8a
 	github.com/lightningnetwork/lnd/fn/v2 v2.0.9
 	github.com/spf13/cobra v1.10.1
@@ -210,6 +209,7 @@ require (
 	github.com/leonklingele/grouper v1.1.2 // indirect
 	github.com/lib/pq v1.10.9 // indirect
 	github.com/lightninglabs/gozmq v0.0.0-20191113021534-d20a764486bf // indirect
+	github.com/lightninglabs/neutrino/cache v1.1.4 // indirect
 	github.com/lightningnetwork/lightning-onion v1.4.0 // indirect
 	github.com/lightningnetwork/lnd/actor v0.0.6 // indirect
 	github.com/lightningnetwork/lnd/cert v1.2.2 // indirect
