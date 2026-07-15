@@ -59,8 +59,9 @@ type spTweakFiles struct {
 	heightToHash map[int32]chainhash.Hash
 
 	// blockFetcher fetches blocks along with the previous output
-	// scripts spent by them.
-	blockFetcher *blockPrevOutFetcher
+	// scripts spent by them, prefetching upcoming heights in the
+	// background.
+	blockFetcher *blockPrefetcher
 
 	// numBlocksIndexed counts the blocks indexed since the last stats
 	// log line, which we emit whenever a file is sealed. Only accessed
@@ -83,9 +84,11 @@ func newSPTweakFiles(itemsPerFile, reOrgSafeDepth int32,
 	taprootStartHeight, taprootSupported := TaprootActivationHeights[chainParams.Net]
 
 	s := &spTweakFiles{
-		tweakData:          make(map[int32]map[int32]*btcec.PublicKey),
-		heightToHash:       make(map[int32]chainhash.Hash),
-		blockFetcher:       blockFetcher,
+		tweakData:    make(map[int32]map[int32]*btcec.PublicKey),
+		heightToHash: make(map[int32]chainhash.Hash),
+		blockFetcher: newBlockPrefetcher(
+			blockFetcher, h2hCache,
+		),
 		statsLastReset:     time.Now(),
 		taprootStartHeight: taprootStartHeight,
 		taprootSupported:   taprootSupported,
@@ -155,7 +158,7 @@ func (s *spTweakFiles) ingest(height int32) error {
 		return nil
 	}
 
-	block, err := s.blockFetcher.fetchBlock(hash)
+	block, err := s.blockFetcher.fetchBlock(height, hash)
 	if err != nil {
 		return fmt.Errorf("error getting block for SP tweak data: %w",
 			err)

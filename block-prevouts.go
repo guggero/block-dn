@@ -48,6 +48,14 @@ const (
 	// SP tweak data: v30.0 is the first version that serves a block's
 	// spent outputs through the /rest/spenttxouts endpoint.
 	minSPTweakBackendVersion = 300_000
+
+	// prefetchDepth is the number of blocks the prefetcher keeps in
+	// flight ahead of the block currently being processed, hiding the
+	// fetch latency behind the tweak computation of the current block.
+	// bitcoind answers REST requests from its RPC worker thread pool
+	// (rpcthreads, 4 by default), so a substantially higher depth only
+	// helps if the backend's pool is raised as well.
+	prefetchDepth = 8
 )
 
 // getBlockScriptPubKey is the subset of the scriptPubKey JSON object of the
@@ -148,12 +156,23 @@ func backendRESTURL(chainCfg *rpcclient.ConnConfig) string {
 func newBlockPrevOutFetcher(chain *rpcclient.Client,
 	chainCfg *rpcclient.ConnConfig) *blockPrevOutFetcher {
 
+	httpClient := &http.Client{
+		Timeout: restRequestTimeout,
+	}
+
+	// Allow as many keep-alive connections to the backend as we have
+	// concurrent block fetches, so the prefetcher doesn't churn through
+	// short-lived TCP connections.
+	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = transport.Clone()
+		transport.MaxIdleConnsPerHost = prefetchDepth + 1
+		httpClient.Transport = transport
+	}
+
 	return &blockPrevOutFetcher{
-		chain:   chain,
-		restURL: backendRESTURL(chainCfg),
-		httpClient: &http.Client{
-			Timeout: restRequestTimeout,
-		},
+		chain:      chain,
+		restURL:    backendRESTURL(chainCfg),
+		httpClient: httpClient,
 	}
 }
 
@@ -204,6 +223,106 @@ func (f *blockPrevOutFetcher) probeREST() {
 	log.Infof("Using the backend's REST API at %s to fetch blocks and "+
 		"spent outputs", f.restURL)
 	f.useREST = true
+}
+
+// prefetchResult is the outcome of a single background block fetch.
+type prefetchResult struct {
+	block *blockWithPrevOuts
+	err   error
+}
+
+// prefetchedBlock tracks a single background block fetch, together with the
+// block hash the fetch was started for, so a reorg that happened between
+// scheduling and consumption can be detected.
+type prefetchedBlock struct {
+	hash   chainhash.Hash
+	result chan prefetchResult
+}
+
+// blockPrefetcher hides the fetch latency of sequential block processing by
+// keeping the fetches for the next few heights running in the background
+// while the current block is being processed.
+//
+// It must only be used from a single goroutine; the background fetches only
+// ever touch their own result channel, never the pending map.
+type blockPrefetcher struct {
+	// fetchSingle fetches a single block. Held as a function reference
+	// so tests can run the prefetcher without a backend.
+	fetchSingle func(*chainhash.Hash) (*blockWithPrevOuts, error)
+
+	// getHash resolves a height to the hash of the block currently at
+	// that height, or errors if the height isn't known (yet).
+	getHash func(int32) (*chainhash.Hash, error)
+
+	depth   int32
+	pending map[int32]prefetchedBlock
+}
+
+// newBlockPrefetcher wraps the given fetcher with a prefetch window of
+// prefetchDepth blocks, resolving upcoming heights through the given cache.
+func newBlockPrefetcher(fetcher *blockPrevOutFetcher,
+	h2hCache *heightToHashCache) *blockPrefetcher {
+
+	return &blockPrefetcher{
+		fetchSingle: fetcher.fetchBlock,
+		getHash:     h2hCache.getBlockHash,
+		depth:       prefetchDepth,
+		pending:     make(map[int32]prefetchedBlock),
+	}
+}
+
+// fetchBlock returns the block at the given height and hash, using a
+// previously prefetched result when possible, and schedules background
+// fetches for the heights following it.
+func (p *blockPrefetcher) fetchBlock(height int32,
+	hash *chainhash.Hash) (*blockWithPrevOuts, error) {
+
+	p.scheduleAhead(height)
+
+	entry, ok := p.pending[height]
+	if ok {
+		delete(p.pending, height)
+
+		res := <-entry.result
+
+		// Only use the prefetched result if it was fetched for the
+		// hash the caller expects; a reorg may have replaced the
+		// block since the fetch was scheduled. Stale and failed
+		// prefetches alike are simply retried through the direct
+		// fetch below.
+		if res.err == nil && entry.hash.IsEqual(hash) {
+			return res.block, nil
+		}
+	}
+
+	return p.fetchSingle(hash)
+}
+
+// scheduleAhead starts background fetches for the blocks following the given
+// height, until the prefetch window is full or a height can't be resolved to
+// a hash, which usually means we've caught up to the chain tip.
+func (p *blockPrefetcher) scheduleAhead(height int32) {
+	for h := height + 1; h <= height+p.depth; h++ {
+		if _, ok := p.pending[h]; ok {
+			continue
+		}
+
+		hash, err := p.getHash(h)
+		if err != nil {
+			return
+		}
+
+		entry := prefetchedBlock{
+			hash:   *hash,
+			result: make(chan prefetchResult, 1),
+		}
+		p.pending[h] = entry
+
+		go func() {
+			block, err := p.fetchSingle(hash)
+			entry.result <- prefetchResult{block: block, err: err}
+		}()
+	}
 }
 
 // requireREST probes the backend's REST API and returns an error if it isn't

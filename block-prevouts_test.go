@@ -3,9 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/btcsuite/btcd/blockchain"
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/stretchr/testify/require"
 )
@@ -140,6 +143,172 @@ func TestBlockPrevOutFetcher(t *testing.T) {
 
 		requireSameBlock(t, block)
 	})
+}
+
+// prefetchTestHarness is a blockPrefetcher hooked up to fake fetch and hash
+// resolution functions, recording every fetch so tests can assert how often
+// and for which hashes the underlying fetcher was invoked.
+type prefetchTestHarness struct {
+	sync.Mutex
+
+	prefetcher *blockPrefetcher
+
+	tip        int32
+	hashSuffix byte
+	fetches    map[chainhash.Hash]int
+	failNext   map[chainhash.Hash]bool
+}
+
+// hashAt derives the deterministic fake hash of the given height on the
+// harness' current chain. Bumping hashSuffix simulates a reorg: every
+// height resolves to a new hash.
+func (h *prefetchTestHarness) hashAt(height int32) *chainhash.Hash {
+	var hash chainhash.Hash
+	binary.LittleEndian.PutUint32(hash[:4], uint32(height))
+	hash[4] = h.hashSuffix
+
+	return &hash
+}
+
+func newPrefetchTestHarness(tip int32, depth int32) *prefetchTestHarness {
+	h := &prefetchTestHarness{
+		tip:      tip,
+		fetches:  make(map[chainhash.Hash]int),
+		failNext: make(map[chainhash.Hash]bool),
+	}
+
+	h.prefetcher = &blockPrefetcher{
+		fetchSingle: func(hash *chainhash.Hash) (*blockWithPrevOuts,
+			error) {
+
+			h.Lock()
+			defer h.Unlock()
+
+			h.fetches[*hash]++
+			if h.failNext[*hash] {
+				delete(h.failNext, *hash)
+				return nil, fmt.Errorf("transient failure")
+			}
+
+			// Embed the fetched hash in the result, so the test
+			// can verify which block a fetch produced.
+			return &blockWithPrevOuts{
+				prevOutScripts: map[wire.OutPoint][]byte{
+					{Hash: *hash}: hash[:],
+				},
+			}, nil
+		},
+		getHash: func(height int32) (*chainhash.Hash, error) {
+			h.Lock()
+			defer h.Unlock()
+
+			if height > h.tip {
+				return nil, fmt.Errorf("height %d out of "+
+					"range", height)
+			}
+
+			return h.hashAt(height), nil
+		},
+		depth:   depth,
+		pending: make(map[int32]prefetchedBlock),
+	}
+
+	return h
+}
+
+// fetchAndCheck fetches the block at the given height through the prefetcher
+// and asserts it corresponds to the current chain's hash at that height.
+func (h *prefetchTestHarness) fetchAndCheck(t *testing.T, height int32) {
+	t.Helper()
+
+	h.Lock()
+	hash := h.hashAt(height)
+	h.Unlock()
+
+	block, err := h.prefetcher.fetchBlock(height, hash)
+	require.NoError(t, err)
+	require.Contains(t, block.prevOutScripts, wire.OutPoint{Hash: *hash})
+}
+
+// numFetches returns how often the underlying fetcher was invoked in total.
+func (h *prefetchTestHarness) numFetches() int {
+	h.Lock()
+	defer h.Unlock()
+
+	total := 0
+	for _, count := range h.fetches {
+		total += count
+	}
+
+	return total
+}
+
+// TestBlockPrefetcherSequential checks that sequential consumption returns
+// the correct block for every height, fetches every block exactly once and
+// never exceeds the configured prefetch depth.
+func TestBlockPrefetcherSequential(t *testing.T) {
+	const (
+		tip   = 20
+		depth = 4
+	)
+	h := newPrefetchTestHarness(tip, depth)
+
+	for height := range int32(tip + 1) {
+		h.fetchAndCheck(t, height)
+
+		require.LessOrEqual(t, len(h.prefetcher.pending), depth)
+	}
+
+	// Every block was fetched exactly once: heights consumed directly
+	// plus prefetched ones, no duplicates, nothing beyond the tip.
+	require.Equal(t, tip+1, h.numFetches())
+	require.Empty(t, h.prefetcher.pending)
+}
+
+// TestBlockPrefetcherReorg checks that prefetched blocks that were scheduled
+// before a reorg are discarded and re-fetched with the post-reorg hash.
+func TestBlockPrefetcherReorg(t *testing.T) {
+	h := newPrefetchTestHarness(20, 4)
+
+	// Consume a few blocks, so the window [6, 9] is prefetched with
+	// pre-reorg hashes.
+	for height := range int32(6) {
+		h.fetchAndCheck(t, height)
+	}
+
+	// Simulate a reorg back to height 3: every height now resolves to a
+	// different hash.
+	h.Lock()
+	h.hashSuffix = 0xff
+	h.Unlock()
+
+	// Continuing from height 4 must transparently discard the stale
+	// prefetches and return the blocks of the new chain.
+	for height := int32(4); height <= 10; height++ {
+		h.fetchAndCheck(t, height)
+	}
+}
+
+// TestBlockPrefetcherFailedPrefetch checks that a failed background fetch is
+// transparently retried when its height is consumed.
+func TestBlockPrefetcherFailedPrefetch(t *testing.T) {
+	h := newPrefetchTestHarness(20, 4)
+
+	// Make the background fetch of height 2 fail once. It is scheduled
+	// by the first fetchBlock call, before height 2 is consumed.
+	h.Lock()
+	h.failNext[*h.hashAt(2)] = true
+	h.Unlock()
+
+	for height := range int32(6) {
+		h.fetchAndCheck(t, height)
+	}
+
+	h.Lock()
+	defer h.Unlock()
+	require.Equal(t, 2, h.fetches[*h.hashAt(2)],
+		"height 2 must have been fetched again after the failed "+
+			"prefetch")
 }
 
 // TestVerifySPTweakBackendVersion pins the minimum backend version required
