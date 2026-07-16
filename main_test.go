@@ -10,12 +10,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs"
+	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/psbt/v2"
@@ -181,6 +184,12 @@ func (ctx *testContext) waitFilesSync(t *testing.T) {
 				headerHeight)
 		}
 
+		customHeight := ctx.server.customFilterFiles.getCurrentHeight()
+		if headerHeight != customHeight {
+			return fmt.Errorf("custom filter height mismatch: "+
+				"%d vs %d", customHeight, headerHeight)
+		}
+
 		return nil
 	}, syncTimeout)
 	require.NoError(t, err)
@@ -260,6 +269,18 @@ var testCases = []struct {
 		name: "fees-estimate",
 		fn:   testFeeEstimate,
 	},
+
+	// The custom filter tests mine additional blocks, so they run last
+	// to not interfere with the tip-height assumptions of the cases
+	// above.
+	{
+		name: "custom-filters",
+		fn:   testCustomFilters,
+	},
+	{
+		name: "custom-filter-headers",
+		fn:   testCustomFilterHeaders,
+	},
 }
 
 func testErrors(t *testing.T, ctx *testContext) {
@@ -323,6 +344,10 @@ func testErrors(t *testing.T, ctx *testContext) {
 			status: 404,
 			error:  "404 page not found",
 		}
+		respBadFilterType = errorResponse{
+			status: 400,
+			error:  "unknown custom filter type: bogus",
+		}
 	)
 	errorCases := map[string]errorResponse{
 		"foo":                                   respNotFound,
@@ -348,6 +373,12 @@ func testErrors(t *testing.T, ctx *testContext) {
 		"filters/" + badInt64:                   respBadHeight,
 		"filters/1":                             respBadStartHeight1,
 		"filters/" + badStartHeight:             respBadStartHeightLarge,
+		"filters/type/segwit":                   respNotFound,
+		"filters/type/bogus/0":                  respBadFilterType,
+		"filters/type/segwit/1":                 respBadStartHeight1,
+		"filter-headers/type/segwit":            respNotFound,
+		"filter-headers/type/bogus/0":           respBadFilterType,
+		"filter-headers/type/segwit/1":          respBadStartHeight1,
 		"block":                                 respNotFound,
 		"block/aaaa":                            respBadHashLength,
 		"block/" + badHash:                      respNotFound,
@@ -991,7 +1022,7 @@ func TestBlockDN(t *testing.T) {
 	// Activate Taproot for regtest.
 	TaprootActivationHeights[chaincfg.RegressionNetParams.Net] = 1
 
-	miner, backend, backendCfg, _ := setupBackend(t, unitTestDir)
+	miner, backend, backendCfg, _ := setupBackend(t)
 
 	dataDir := t.TempDir()
 	listenAddr := fmt.Sprintf("127.0.0.1:%d", port.NextAvailablePort())
@@ -1119,9 +1150,155 @@ func newBitcoind(t *testing.T, logdir string,
 }
 
 // nolint:unparam
-func setupBackend(t *testing.T, testDir string) (*lntestminer.HarnessMiner,
+// testCustomFilters exercises the /filters/type/<name>/<height> endpoint:
+// sealed files served from disk, the unsealed tail served from memory and
+// the filter content of a block with known outputs.
+func testCustomFilters(t *testing.T, ctx *testContext) {
+	// Create one output of each custom filter type, so the tip block
+	// contains known scripts, then mine and wait for the files to sync.
+	spendScripts := [][]byte{
+		testScriptP2WPKH, testScriptP2WSH, testScriptP2TR,
+	}
+	for _, pkScript := range spendScripts {
+		ctx.miner.SendOutput(&wire.TxOut{
+			Value:    100_000,
+			PkScript: pkScript,
+		}, 2)
+	}
+	minedBlocks := ctx.miner.MineBlocksAndAssertNumTxes(
+		1, len(spendScripts),
+	)
+	ctx.waitBackendSync(t)
+	ctx.waitFilesSync(t)
+
+	tipHash := minedBlocks[0].BlockHash()
+	key := builder.DeriveKey(&tipHash)
+	tipHeight := int(ctx.server.customFilterFiles.getCurrentHeight())
+
+	for _, cfg := range customFilterConfigs {
+		// The first file is sealed and must be served from disk.
+		body, headers := ctx.fetchBinary(
+			t, fmt.Sprintf("filters/type/%s/0", cfg.name),
+		)
+		filters := parseVarIntPrefixedList(t, body)
+		require.Len(t, filters, DefaultRegtestFiltersPerFile)
+		require.Equal(t, cacheDisk, headers.Get(HeaderCache))
+		require.Equal(t, "*", headers.Get(HeaderCORS))
+
+		// The unsealed tail is served from memory.
+		body, headers = ctx.fetchBinary(t, fmt.Sprintf(
+			"filters/type/%s/%d", cfg.name,
+			DefaultRegtestFiltersPerFile,
+		))
+		tail := parseVarIntPrefixedList(t, body)
+		require.Len(t, tail, tipHeight-DefaultRegtestFiltersPerFile+1)
+		require.Equal(t, cacheMemory, headers.Get(HeaderCache))
+		require.Equal(t, "*", headers.Get(HeaderCORS))
+
+		// The tip block's filter must match exactly the scripts of
+		// the set's types.
+		tipFilter, err := gcs.FromNBytes(
+			builder.DefaultP, builder.DefaultM, tail[len(tail)-1],
+		)
+		require.NoError(t, err)
+
+		for _, pkScript := range spendScripts {
+			match, err := tipFilter.Match(key, pkScript)
+			require.NoError(t, err)
+			require.Equalf(
+				t, classifyScript(pkScript)&cfg.types != 0,
+				match, "filter %s, script %x", cfg.name,
+				pkScript,
+			)
+		}
+	}
+}
+
+// testCustomFilterHeaders exercises the endpoint
+// /filter-headers/type/<name>/<height> and cross-checks the served header
+// chains against the filters served by /filters/type/<name>/<height>.
+func testCustomFilterHeaders(t *testing.T, ctx *testContext) {
+	tipHeight := int(ctx.server.customFilterFiles.getCurrentHeight())
+
+	for _, cfg := range customFilterConfigs {
+		// The first file is sealed and must be served from disk.
+		body, headers := ctx.fetchBinary(t, fmt.Sprintf(
+			"filter-headers/type/%s/0", cfg.name,
+		))
+		require.Len(
+			t, body,
+			DefaultRegtestHeadersPerFile*chainhash.HashSize,
+		)
+		require.Equal(t, cacheDisk, headers.Get(HeaderCache))
+		require.Equal(t, "*", headers.Get(HeaderCORS))
+
+		// The unsealed tail is served from memory.
+		tailBody, tailHeaders := ctx.fetchBinary(t, fmt.Sprintf(
+			"filter-headers/type/%s/%d", cfg.name,
+			DefaultRegtestHeadersPerFile,
+		))
+		expectedLen := (tipHeight - DefaultRegtestHeadersPerFile + 1) *
+			chainhash.HashSize
+		require.Len(t, tailBody, expectedLen)
+		require.Equal(t, cacheMemory, tailHeaders.Get(HeaderCache))
+		require.Equal(t, "*", tailHeaders.Get(HeaderCORS))
+
+		headerBytes := slices.Concat(body, tailBody)
+
+		// Re-compute the whole chain from the filters endpoint and
+		// compare every height's header:
+		// header = dsha256(dsha256(filter) || prev_header).
+		filterBody, _ := ctx.fetchBinary(
+			t, fmt.Sprintf("filters/type/%s/0", cfg.name),
+		)
+		filterTail, _ := ctx.fetchBinary(t, fmt.Sprintf(
+			"filters/type/%s/%d", cfg.name,
+			DefaultRegtestFiltersPerFile,
+		))
+		filters := parseVarIntPrefixedList(
+			t, slices.Concat(filterBody, filterTail),
+		)
+		require.Len(t, filters, tipHeight+1)
+
+		var prevHeader chainhash.Hash
+		for i, filterBytes := range filters {
+			filterHash := chainhash.DoubleHashB(filterBytes)
+			prevHeader = chainhash.DoubleHashH(
+				append(filterHash, prevHeader[:]...),
+			)
+
+			offset := i * chainhash.HashSize
+			require.Equalf(
+				t, prevHeader[:],
+				headerBytes[offset:offset+chainhash.HashSize],
+				"filter %s, height %d", cfg.name, i,
+			)
+		}
+	}
+}
+
+// parseVarIntPrefixedList splits a response body consisting of var-int
+// length prefixed entries into the individual entries.
+func parseVarIntPrefixedList(t *testing.T, body []byte) [][]byte {
+	t.Helper()
+
+	reader := bytes.NewReader(body)
+	var entries [][]byte
+	for reader.Len() > 0 {
+		entry, err := wire.ReadVarBytes(
+			reader, 0, wire.MaxMessagePayload, "entry",
+		)
+		require.NoError(t, err)
+		entries = append(entries, entry)
+	}
+
+	return entries
+}
+
+func setupBackend(t *testing.T) (*lntestminer.HarnessMiner,
 	*rpcclient.Client, rpcclient.ConnConfig, *chain.BitcoindConfig) {
 
+	testDir := unitTestDir
 	ctx := context.Background()
 	setupLogging(testDir, "debug")
 

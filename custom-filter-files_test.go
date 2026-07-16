@@ -158,7 +158,7 @@ func TestBuildCustomFilters(t *testing.T) {
 // the on-disk filter header chains from genesis and checks that a restart
 // resumes the header chains correctly from disk.
 func TestCustomFilterFilesUpdate(t *testing.T) {
-	miner, backend, backendCfg, _ := setupBackend(t, unitTestDir)
+	miner, backend, backendCfg, _ := setupBackend(t)
 
 	// Mine initial blocks. The miner starts with 200 blocks already
 	// mined.

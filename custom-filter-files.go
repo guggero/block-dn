@@ -65,6 +65,18 @@ var customFilterConfigs = []customFilterConfig{
 	},
 }
 
+// customFilterConfigIndex returns the index of the custom filter
+// configuration with the given name.
+func customFilterConfigIndex(name string) (int, bool) {
+	for i, cfg := range customFilterConfigs {
+		if cfg.name == name {
+			return i, true
+		}
+	}
+
+	return 0, false
+}
+
 // customFilterDir returns the directory (relative to the base directory) the
 // filter files of the given configuration are stored in.
 func customFilterDir(name string) string {
@@ -630,6 +642,42 @@ func (c *customFilterFiles) cachedHash(height int32) (chainhash.Hash, bool) {
 
 	hash, ok := c.heightToHash[height]
 	return hash, ok
+}
+
+// filtersSize returns the exact serialized size of the var-int prefixed
+// filters of the given configuration index in [startIndex, endIndex], or
+// false if any of them is missing from the in-memory tail.
+func (c *customFilterFiles) filtersSize(cfgIndex int, startIndex,
+	endIndex int32) (int64, bool) {
+
+	c.RLock()
+	defer c.RUnlock()
+
+	var total int64
+	for j := startIndex; j <= endIndex; j++ {
+		filters, ok := c.filters[j]
+		if !ok {
+			return 0, false
+		}
+
+		filter := filters[cfgIndex]
+		total += int64(wire.VarIntSerializeSize(uint64(len(filter)))) +
+			int64(len(filter))
+	}
+
+	return total, true
+}
+
+// filterHeadersSize returns the exact serialized size of the filter headers
+// in [startIndex, endIndex]; each one is a 32-byte hash.
+func (c *customFilterFiles) filterHeadersSize(startIndex, endIndex int32) (
+	int64, bool) {
+
+	if endIndex < startIndex {
+		return 0, false
+	}
+
+	return int64(endIndex-startIndex+1) * chainhash.HashSize, true
 }
 
 // serializeFilters writes the var-int prefixed filters of the given

@@ -55,6 +55,18 @@ var (
 		"SP tweak data indexing is turned off",
 	)
 
+	// errUnavailableCustomFiltersTurnedOff is an error indicating that
+	// the custom filter indexing is turned off.
+	errUnavailableCustomFiltersTurnedOff = errors.New(
+		"custom filter indexing is turned off",
+	)
+
+	// errUnknownCustomFilterType is an error indicating that the
+	// requested custom filter type doesn't exist.
+	errUnknownCustomFilterType = errors.New(
+		"unknown custom filter type",
+	)
+
 	// errStillStartingUp is an error indicating that the server is still
 	// starting up and not ready to serve requests yet.
 	errStillStartingUp = errors.New(
@@ -139,10 +151,18 @@ func (s *server) createRouter() *mux.Router {
 		"/filter-headers/import/{height:[0-9]+}",
 		s.filterHeadersImportRequestHandler,
 	)
+	router.HandleFunc(
+		"/filter-headers/type/{filterType}/{height:[0-9]+}",
+		s.customFilterHeadersRequestHandler,
+	)
 	router.HandleFunc("/filters/{height:[0-9]+}", s.filtersRequestHandler)
 	router.HandleFunc(
 		"/filters/single/{height:[0-9]+}",
 		s.filterSingleRequestHandler,
+	)
+	router.HandleFunc(
+		"/filters/type/{filterType}/{height:[0-9]+}",
+		s.customFiltersRequestHandler,
 	)
 	router.HandleFunc(
 		"/sp/tweak-data/{height:[0-9]+}",
@@ -291,6 +311,82 @@ func (s *server) filtersRequestHandler(w http.ResponseWriter, r *http.Request) {
 		w, r, FilterFileDir, FilterFileNamePattern,
 		int64(s.filtersPerFile), s.cFilterFiles.serializeFilters,
 		s.cFilterFiles.filtersSize, s.cFilterFiles,
+	)
+}
+
+// customFilterConfig resolves the {filterType} route variable to a custom
+// filter configuration index, writing the appropriate error response if the
+// custom filter producer isn't running or the type doesn't exist.
+func (s *server) customFilterConfig(w http.ResponseWriter,
+	r *http.Request) (string, int, bool) {
+
+	if s.customFilterFiles == nil {
+		sendError(w, status503, errUnavailableCustomFiltersTurnedOff)
+		return "", 0, false
+	}
+
+	filterType := mux.Vars(r)["filterType"]
+	cfgIndex, ok := customFilterConfigIndex(filterType)
+	if !ok {
+		err := fmt.Errorf("%w: %s", errUnknownCustomFilterType,
+			filterType)
+		sendError(w, status400, err)
+		return "", 0, false
+	}
+
+	return filterType, cfgIndex, true
+}
+
+// customFiltersRequestHandler serves /filters/type/{filterType}/{height}:
+// the batched filter files of one output-type-restricted filter set, in the
+// same format as the basic /filters/{height} endpoint.
+func (s *server) customFiltersRequestHandler(w http.ResponseWriter,
+	r *http.Request) {
+
+	filterType, cfgIndex, ok := s.customFilterConfig(w, r)
+	if !ok {
+		return
+	}
+
+	s.heightBasedRequestHandler(
+		w, r, customFilterDir(filterType), FilterFileNamePattern,
+		int64(s.filtersPerFile),
+		func(w io.Writer, startIndex, endIndex int32) error {
+			return s.customFilterFiles.serializeFilters(
+				w, cfgIndex, startIndex, endIndex,
+			)
+		},
+		func(startIndex, endIndex int32) (int64, bool) {
+			return s.customFilterFiles.filtersSize(
+				cfgIndex, startIndex, endIndex,
+			)
+		},
+		s.customFilterFiles,
+	)
+}
+
+// customFilterHeadersRequestHandler serves the endpoint
+// /filter-headers/type/{filterType}/{height}: the batched filter header
+// files of one output-type-restricted filter set, in the same format (and
+// with the same entries per file) as the basic /filter-headers/{height}
+// endpoint.
+func (s *server) customFilterHeadersRequestHandler(w http.ResponseWriter,
+	r *http.Request) {
+
+	filterType, cfgIndex, ok := s.customFilterConfig(w, r)
+	if !ok {
+		return
+	}
+
+	s.heightBasedRequestHandler(
+		w, r, customHeaderDir(filterType), FilterHeaderFileNamePattern,
+		int64(s.headersPerFile),
+		func(w io.Writer, startIndex, endIndex int32) error {
+			return s.customFilterFiles.serializeFilterHeaders(
+				w, cfgIndex, startIndex, endIndex,
+			)
+		},
+		s.customFilterFiles.filterHeadersSize, s.customFilterFiles,
 	)
 }
 

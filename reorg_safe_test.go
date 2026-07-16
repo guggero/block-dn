@@ -112,7 +112,7 @@ func startReorgTestServer(t *testing.T,
 	// something to do; matches TestBlockDN's setup.
 	TaprootActivationHeights[chaincfg.RegressionNetParams.Net] = 1
 
-	miner, backend, backendCfg, _ := setupBackend(t, unitTestDir)
+	miner, backend, backendCfg, _ := setupBackend(t)
 	dataDir := t.TempDir()
 	listenAddr := fmt.Sprintf("127.0.0.1:%d", port.NextAvailablePort())
 

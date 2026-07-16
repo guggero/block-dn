@@ -28,7 +28,7 @@ const (
 )
 
 func TestHeaderFilesUpdate(t *testing.T) {
-	miner, backend, _, _ := setupBackend(t, unitTestDir)
+	miner, backend, _, _ := setupBackend(t)
 
 	// Mine initial blocks. The miner starts with 438 blocks already mined.
 	_ = miner.MineEmptyBlocks(initialBlocks - int(totalStartupBlocks))
