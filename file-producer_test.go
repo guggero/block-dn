@@ -184,6 +184,46 @@ func TestSealReadyFiles_SecondFileWriteErrorPreservesFirstAdvance(t *testing.T) 
 		"lastSealedHeight should reflect the one successful seal")
 }
 
+func TestUpdateCacheAndFiles_SealsDuringCatchUp(t *testing.T) {
+	// Regression test: a long catch-up must seal each file as soon as its
+	// range has dropped reorg-safe-depth below the ingest position, not
+	// in a single burst once the entire range has been ingested. The
+	// latter would hold the whole range in memory and lose all catch-up
+	// progress on restart, since resumption starts after the last file
+	// on disk.
+	p, _ := newTestProducer(100, 6)
+
+	// Record the ingest position at which every seal happens.
+	type sealEvent struct {
+		fileStart int32
+		fileEnd   int32
+		atHeight  int32
+	}
+	var seals []sealEvent
+	p.hooks.ingest = func(int32) error {
+		return nil
+	}
+	p.hooks.writeSealedFile = func(s, e int32) error {
+		seals = append(seals, sealEvent{
+			fileStart: s,
+			fileEnd:   e,
+			atHeight:  p.currentHeight.Load(),
+		})
+		return nil
+	}
+
+	require.NoError(t, p.updateCacheAndFiles(0, 305))
+
+	// Every file must have been sealed at the earliest height at which
+	// its last block became reorg-safe.
+	require.Equal(t, []sealEvent{
+		{fileStart: 0, fileEnd: 99, atHeight: 105},
+		{fileStart: 100, fileEnd: 199, atHeight: 205},
+		{fileStart: 200, fileEnd: 299, atHeight: 305},
+	}, seals)
+	require.EqualValues(t, 299, p.lastSealedHeight.Load())
+}
+
 func TestRollback_PrunesRangeAndInvalidatesCache(t *testing.T) {
 	// Build a producer with a small populated h2hCache and assert that
 	// rollback (a) calls pruneLocked with the right inclusive range,

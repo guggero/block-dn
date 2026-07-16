@@ -72,7 +72,7 @@ func TestSPTweakDataFilesUpdate(t *testing.T) {
 	// Activate Taproot for regtest.
 	TaprootActivationHeights[chaincfg.RegressionNetParams.Net] = 1
 
-	miner, backend, _, _ := setupBackend(t, unitTestDir)
+	miner, backend, backendCfg, _ := setupBackend(t, unitTestDir)
 
 	// Mine initial blocks. The miner starts with 200 blocks already mined.
 	_ = miner.MineEmptyBlocks(initialBlocks - int(totalStartupBlocks))
@@ -86,7 +86,8 @@ func TestSPTweakDataFilesUpdate(t *testing.T) {
 	h2hCache := newH2HCache(backend)
 	hf := newSPTweakFiles(
 		tweakBlocksPerFile, testReOrgSafeDepth, backend, quit, dataDir,
-		&testParams, h2hCache, DefaultPrevOutCacheMiBytes,
+		&testParams, h2hCache,
+		newBlockPrevOutFetcher(backend, &backendCfg),
 	)
 
 	var wg sync.WaitGroup
@@ -120,7 +121,8 @@ func TestSPTweakDataFilesUpdate(t *testing.T) {
 	quit = make(chan struct{})
 	hf = newSPTweakFiles(
 		tweakBlocksPerFile, testReOrgSafeDepth, backend, quit, dataDir,
-		&testParams, h2hCache, DefaultPrevOutCacheMiBytes,
+		&testParams, h2hCache,
+		newBlockPrevOutFetcher(backend, &backendCfg),
 	)
 
 	// Wait for the final blocks to be written.
@@ -152,7 +154,7 @@ func TestSilentPaymentsDetection(t *testing.T) {
 	// Activate Taproot for regtest.
 	TaprootActivationHeights[chaincfg.RegressionNetParams.Net] = 1
 
-	miner, backend, _, bitcoindCfg := setupBackend(t, unitTestDir)
+	miner, backend, backendCfg, bitcoindCfg := setupBackend(t, unitTestDir)
 	wallet, scopeMgr := newTestWallet(
 		t, &testParams, bitcoindCfg, seedBytes,
 	)
@@ -169,7 +171,8 @@ func TestSilentPaymentsDetection(t *testing.T) {
 	h2hCache := newH2HCache(backend)
 	hf := newSPTweakFiles(
 		tweakBlocksPerFile, testReOrgSafeDepth, backend, quit, dataDir,
-		&testParams, h2hCache, DefaultPrevOutCacheMiBytes,
+		&testParams, h2hCache,
+		newBlockPrevOutFetcher(backend, &backendCfg),
 	)
 
 	// Wait for the initial blocks to be written.

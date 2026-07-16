@@ -43,10 +43,8 @@ jobs:
       - name: check code format
         run: make fmt-check
 
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: '${{ env.LINT_VERSION }}'
+      - name: lint
+        run: make lint
 
   ########################
   # run unit tests

@@ -120,7 +120,7 @@ func startReorgTestServer(t *testing.T,
 		false, true, dataDir, listenAddr, &backendCfg,
 		unittest.NetParams, params.reOrgSafeDepth,
 		params.headersPerFile, params.filtersPerFile,
-		params.spTweaksPerFile, DefaultPrevOutCacheMiBytes,
+		params.spTweaksPerFile,
 		defaultReadTimeout, defaultWriteTimeout,
 	)
 	ctx := &testContext{
