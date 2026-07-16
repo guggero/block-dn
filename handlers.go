@@ -200,21 +200,33 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 	s.h2hCache.RLock()
 	defer s.h2hCache.RUnlock()
 
-	bestHeight := s.headerFiles.getCurrentHeight()
-	bestBlock, err := s.h2hCache.getBlockHash(bestHeight)
+	status, err := s.currentStatus()
 	if err != nil {
 		sendError(w, status500, errInvalidSyncStatus)
 		return
 	}
 
+	sendJSON(w, status, maxAgeMemory)
+}
+
+// currentStatus assembles the /status response from the current state of the
+// producers. The caller must hold the h2hCache read lock.
+func (s *server) currentStatus() (*Status, error) {
+	bestHeight := s.headerFiles.getCurrentHeight()
+	bestBlock, err := s.h2hCache.getBlockHash(bestHeight)
+	if err != nil {
+		return nil, err
+	}
+
 	bestFilter, ok := s.headerFiles.filterHeaderAtHeight(bestHeight)
 	if !ok {
-		sendError(w, status500, errInvalidSyncStatus)
-		return
+		return nil, fmt.Errorf("no filter header at height %d",
+			bestHeight)
 	}
 
 	var (
 		spHeight     int32
+		customHeight int32
 		filterHeight = s.cFilterFiles.currentHeight.Load()
 		allSynced    = bestHeight == filterHeight
 	)
@@ -223,23 +235,29 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 		allSynced = allSynced && bestHeight == spHeight
 	}
 
-	status := &Status{
-		Version:               version,
-		Commit:                Commit,
-		ChainGenesisHash:      s.chainParams.GenesisHash.String(),
-		ChainName:             s.chainParams.Name,
-		BestBlockHeight:       bestHeight,
-		BestBlockHash:         bestBlock.String(),
-		BestFilterHeight:      filterHeight,
-		BestFilterHeader:      bestFilter.String(),
-		BestSPTweakHeight:     spHeight,
-		EntriesPerHeaderFile:  s.headersPerFile,
-		EntriesPerFilterFile:  s.filtersPerFile,
-		EntriesPerSPTweakFile: s.spTweaksPerFile,
-		AllFilesSynced:        allSynced,
+	customAvailable := s.customFilterFiles != nil
+	if customAvailable {
+		customHeight = s.customFilterFiles.currentHeight.Load()
+		allSynced = allSynced && bestHeight == customHeight
 	}
 
-	sendJSON(w, status, maxAgeMemory)
+	return &Status{
+		Version:                version,
+		Commit:                 Commit,
+		ChainGenesisHash:       s.chainParams.GenesisHash.String(),
+		ChainName:              s.chainParams.Name,
+		BestBlockHeight:        bestHeight,
+		BestBlockHash:          bestBlock.String(),
+		BestFilterHeight:       filterHeight,
+		BestFilterHeader:       bestFilter.String(),
+		BestSPTweakHeight:      spHeight,
+		CustomFiltersAvailable: customAvailable,
+		BestCustomFilterHeight: customHeight,
+		EntriesPerHeaderFile:   s.headersPerFile,
+		EntriesPerFilterFile:   s.filtersPerFile,
+		EntriesPerSPTweakFile:  s.spTweaksPerFile,
+		AllFilesSynced:         allSynced,
+	}, nil
 }
 
 func (s *server) headersRequestHandler(w http.ResponseWriter, r *http.Request) {

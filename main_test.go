@@ -463,6 +463,8 @@ func testStatus(t *testing.T, ctx *testContext) {
 	require.Equal(t, height, status.BestBlockHeight)
 	require.Equal(t, height, status.BestFilterHeight)
 	require.Equal(t, height, status.BestSPTweakHeight)
+	require.True(t, status.CustomFiltersAvailable)
+	require.Equal(t, height, status.BestCustomFilterHeight)
 	require.Equal(t, blockHash.String(), status.BestBlockHash)
 
 	filterHeader, ok := ctx.server.headerFiles.filterHeaderAtHeight(height)
