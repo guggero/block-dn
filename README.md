@@ -70,6 +70,7 @@ Flags:
       --bitcoind-pass string      The RPC password of the bitcoind instance to connect to
       --bitcoind-user string      The RPC username of the bitcoind instance to connect to
   -h, --help                      help for block-dn
+      --index-custom-filters      Indicates if the server should build custom output-type-restricted compact filters (four sets: segwit, p2wpkh, p2wsh, p2tr); adds about 8 GB more data as of block 950k; requires bitcoind v30.0 or later with the REST API enabled (rest=1)
       --index-page string         Full path to the index.html that should be used instead of the default one that comes with the project
       --index-sp-tweak-data       Indicates if the server should index BIP-0352 Silent Payments tweak data that allows light clients to scan the chain for inbound SP more efficiently; this requires every block since the activation of Taproot to be indexed which may take a while; requires bitcoind v30.0 or later with the REST API enabled (rest=1)
       --light-mode                Indicates if the server should run in light mode which creates no files on disk and therefore requires zero disk space; but only the status and block endpoints are available in this mode

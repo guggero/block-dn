@@ -37,37 +37,39 @@ var (
 )
 
 type server struct {
-	lightMode        bool
-	indexSPTweakData bool
-	baseDir          string
-	listenAddr       string
-	chainCfg         *rpcclient.ConnConfig
-	chainParams      *chaincfg.Params
-	reOrgSafeDepth   uint32
-	readTimeout      time.Duration
-	writeTimeout     time.Duration
-	chain            *rpcclient.Client
-	router           *mux.Router
-	httpServer       *http.Server
+	lightMode          bool
+	indexSPTweakData   bool
+	indexCustomFilters bool
+	baseDir            string
+	listenAddr         string
+	chainCfg           *rpcclient.ConnConfig
+	chainParams        *chaincfg.Params
+	reOrgSafeDepth     uint32
+	readTimeout        time.Duration
+	writeTimeout       time.Duration
+	chain              *rpcclient.Client
+	router             *mux.Router
+	httpServer         *http.Server
 
 	headersPerFile  int32
 	filtersPerFile  int32
 	spTweaksPerFile int32
 
-	h2hCache     *heightToHashCache
-	headerFiles  *headerFiles
-	cFilterFiles *cFilterFiles
-	spTweakFiles *spTweakFiles
+	h2hCache          *heightToHashCache
+	headerFiles       *headerFiles
+	cFilterFiles      *cFilterFiles
+	spTweakFiles      *spTweakFiles
+	customFilterFiles *customFilterFiles
 
 	wg   sync.WaitGroup
 	errs *fn.ConcurrentQueue[error]
 	quit chan struct{}
 }
 
-func newServer(lightMode, indexSPTweakData bool, baseDir, listenAddr string,
-	chainCfg *rpcclient.ConnConfig, chainParams *chaincfg.Params,
-	reOrgSafeDepth uint32, headersPerFile, filtersPerFile,
-	spTweaksPerFile int32, readTimeout,
+func newServer(lightMode, indexSPTweakData, indexCustomFilters bool, baseDir,
+	listenAddr string, chainCfg *rpcclient.ConnConfig,
+	chainParams *chaincfg.Params, reOrgSafeDepth uint32, headersPerFile,
+	filtersPerFile, spTweaksPerFile int32, readTimeout,
 	writeTimeout time.Duration) *server {
 
 	// A zero timeout would disable the protection entirely; fall back to
@@ -80,15 +82,16 @@ func newServer(lightMode, indexSPTweakData bool, baseDir, listenAddr string,
 	}
 
 	s := &server{
-		lightMode:        lightMode,
-		indexSPTweakData: indexSPTweakData,
-		baseDir:          baseDir,
-		listenAddr:       listenAddr,
-		chainCfg:         chainCfg,
-		chainParams:      chainParams,
-		reOrgSafeDepth:   reOrgSafeDepth,
-		readTimeout:      readTimeout,
-		writeTimeout:     writeTimeout,
+		lightMode:          lightMode,
+		indexSPTweakData:   indexSPTweakData,
+		indexCustomFilters: indexCustomFilters,
+		baseDir:            baseDir,
+		listenAddr:         listenAddr,
+		chainCfg:           chainCfg,
+		chainParams:        chainParams,
+		reOrgSafeDepth:     reOrgSafeDepth,
+		readTimeout:        readTimeout,
+		writeTimeout:       writeTimeout,
 
 		headersPerFile:  headersPerFile,
 		filtersPerFile:  filtersPerFile,
@@ -103,16 +106,17 @@ func newServer(lightMode, indexSPTweakData bool, baseDir, listenAddr string,
 	return s
 }
 
-// checkSPTweakBackend verifies that the connected backend meets the
-// requirements for indexing SP tweak data: bitcoind v30.0 or later with the
-// REST API enabled.
-func (s *server) checkSPTweakBackend(fetcher *blockPrevOutFetcher) error {
+// checkPrevOutBackend verifies that the connected backend meets the
+// requirements for indexing data derived from previous outputs (SP tweak
+// data and custom filters): bitcoind v30.0 or later with the REST API
+// enabled.
+func (s *server) checkPrevOutBackend(fetcher *blockPrevOutFetcher) error {
 	info, err := s.chain.GetNetworkInfo()
 	if err != nil {
 		return fmt.Errorf("error querying backend version: %w", err)
 	}
 
-	if err := verifySPTweakBackendVersion(info.Version); err != nil {
+	if err := verifyPrevOutBackendVersion(info.Version); err != nil {
 		return err
 	}
 
@@ -126,13 +130,15 @@ func (s *server) start() error {
 	}
 	s.chain = client
 
-	// Indexing SP tweak data needs the backend's undo data, which is only
-	// served through the REST API of bitcoind v30.0 or later. We verify
-	// both requirements up front, so a misconfigured backend fails the
-	// startup instead of surfacing an error mid-catch-up.
+	// Indexing SP tweak data or custom filters needs the backend's undo
+	// data, which is only served through the REST API of bitcoind v30.0
+	// or later. We verify both requirements up front, so a misconfigured
+	// backend fails the startup instead of surfacing an error
+	// mid-catch-up.
 	blockFetcher := newBlockPrevOutFetcher(s.chain, s.chainCfg)
-	if s.indexSPTweakData && !s.lightMode {
-		if err := s.checkSPTweakBackend(blockFetcher); err != nil {
+	needPrevOuts := s.indexSPTweakData || s.indexCustomFilters
+	if needPrevOuts && !s.lightMode {
+		if err := s.checkPrevOutBackend(blockFetcher); err != nil {
 			return err
 		}
 	}
@@ -245,31 +251,57 @@ func (s *server) start() error {
 		}
 	}()
 
-	// If we're not indexing SP tweak data, we can return here.
-	if !s.indexSPTweakData {
-		return nil
+	if s.indexSPTweakData {
+		s.spTweakFiles = newSPTweakFiles(
+			s.spTweaksPerFile, int32(s.reOrgSafeDepth), s.chain,
+			s.quit, s.baseDir, s.chainParams, s.h2hCache,
+			blockFetcher,
+		)
+
+		s.wg.Add(1)
+		go func() {
+			defer func() {
+				s.wg.Done()
+				log.Infof("Background SP tweak data file " +
+					"update finished")
+			}()
+
+			log.Infof("Starting background SP tweak data file " +
+				"update")
+			err := s.spTweakFiles.updateFiles(info.Blocks)
+			if err != nil && !errors.Is(err, errServerShutdown) {
+				log.Errorf("Error updating SP tweak data "+
+					"file: %v", err)
+				s.errs.ChanIn() <- err
+			}
+		}()
 	}
 
-	s.spTweakFiles = newSPTweakFiles(
-		s.spTweaksPerFile, int32(s.reOrgSafeDepth), s.chain, s.quit,
-		s.baseDir, s.chainParams, s.h2hCache, blockFetcher,
-	)
+	if s.indexCustomFilters {
+		s.customFilterFiles = newCustomFilterFiles(
+			s.filtersPerFile, s.headersPerFile,
+			int32(s.reOrgSafeDepth), s.chain, s.quit, s.baseDir,
+			s.chainParams, s.h2hCache, blockFetcher,
+		)
 
-	s.wg.Add(1)
-	go func() {
-		defer func() {
-			s.wg.Done()
-			log.Infof("Background SP tweak data file update " +
-				"finished")
+		s.wg.Add(1)
+		go func() {
+			defer func() {
+				s.wg.Done()
+				log.Infof("Background custom filter file " +
+					"update finished")
+			}()
+
+			log.Infof("Starting background custom filter file " +
+				"update")
+			err := s.customFilterFiles.updateFiles(info.Blocks)
+			if err != nil && !errors.Is(err, errServerShutdown) {
+				log.Errorf("Error updating custom filter "+
+					"files: %v", err)
+				s.errs.ChanIn() <- err
+			}
 		}()
-
-		log.Infof("Starting background SP tweak data file update")
-		err := s.spTweakFiles.updateFiles(info.Blocks)
-		if err != nil && !errors.Is(err, errServerShutdown) {
-			log.Errorf("Error updating SP tweak data file: %v", err)
-			s.errs.ChanIn() <- err
-		}
-	}()
+	}
 
 	return nil
 }

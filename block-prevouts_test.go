@@ -311,13 +311,13 @@ func TestBlockPrefetcherFailedPrefetch(t *testing.T) {
 			"prefetch")
 }
 
-// TestVerifySPTweakBackendVersion pins the minimum backend version required
+// TestVerifyPrevOutBackendVersion pins the minimum backend version required
 // for indexing SP tweak data.
-func TestVerifySPTweakBackendVersion(t *testing.T) {
-	require.Error(t, verifySPTweakBackendVersion(250_000))
-	require.Error(t, verifySPTweakBackendVersion(299_900))
-	require.NoError(t, verifySPTweakBackendVersion(300_000))
-	require.NoError(t, verifySPTweakBackendVersion(310_100))
+func TestVerifyPrevOutBackendVersion(t *testing.T) {
+	require.Error(t, verifyPrevOutBackendVersion(250_000))
+	require.Error(t, verifyPrevOutBackendVersion(299_900))
+	require.NoError(t, verifyPrevOutBackendVersion(300_000))
+	require.NoError(t, verifyPrevOutBackendVersion(310_100))
 }
 
 // TestGetBlockWithPrevOuts checks that fetching a block through the getblock

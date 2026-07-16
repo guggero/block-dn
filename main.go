@@ -44,6 +44,7 @@ type mainCommand struct {
 
 	lightMode           bool
 	indexSPTweakData    bool
+	indexCustomFilters  bool
 	prevOutCacheSizeMiB uint16
 
 	baseDir   string
@@ -148,7 +149,8 @@ func main() {
 			}
 
 			server := newServer(
-				cc.lightMode, cc.indexSPTweakData, cc.baseDir,
+				cc.lightMode, cc.indexSPTweakData,
+				cc.indexCustomFilters, cc.baseDir,
 				cc.listenAddr, cc.bitcoindConfig, chainParams,
 				cc.reOrgSafeDepth, headersPerFile,
 				filtersPerFile, spTweaksPerFile,
@@ -214,6 +216,14 @@ func main() {
 			"Taproot to be indexed which may take a while; "+
 			"requires bitcoind v30.0 or later with the REST API "+
 			"enabled (rest=1)",
+	)
+	cc.cmd.PersistentFlags().BoolVar(
+		&cc.indexCustomFilters, "index-custom-filters", false,
+		"Indicates if the server should build custom "+
+			"output-type-restricted compact filters (four sets: "+
+			"segwit, p2wpkh, p2wsh, p2tr); adds about 8 GB more "+
+			"data as of block 950k; requires bitcoind v30.0 or "+
+			"later with the REST API enabled (rest=1)",
 	)
 	cc.cmd.PersistentFlags().Uint16Var(
 		&cc.prevOutCacheSizeMiB, "prev-out-cache-size-mib", 1024,

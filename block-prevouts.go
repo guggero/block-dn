@@ -43,11 +43,12 @@ const (
 	// inputs) than its serialized size in bytes.
 	maxSpentTxOutsPerBlock = wire.MaxBlockPayload
 
-	// minSPTweakBackendVersion is the minimum bitcoind version (in the
+	// minPrevOutBackendVersion is the minimum bitcoind version (in the
 	// numeric format reported by getnetworkinfo) we require for indexing
-	// SP tweak data: v30.0 is the first version that serves a block's
-	// spent outputs through the /rest/spenttxouts endpoint.
-	minSPTweakBackendVersion = 300_000
+	// data derived from previous outputs (SP tweak data and custom
+	// filters): v30.0 is the first version that serves a block's spent
+	// outputs through the /rest/spenttxouts endpoint.
+	minPrevOutBackendVersion = 300_000
 
 	// prefetchDepth is the number of blocks the prefetcher keeps in
 	// flight ahead of the block currently being processed, hiding the
@@ -341,14 +342,14 @@ func (f *blockPrevOutFetcher) requireREST() error {
 	return nil
 }
 
-// verifySPTweakBackendVersion returns an error if the given backend version
+// verifyPrevOutBackendVersion returns an error if the given backend version
 // (in the numeric format reported by getnetworkinfo) is too old for indexing
-// SP tweak data.
-func verifySPTweakBackendVersion(version int32) error {
-	if version < minSPTweakBackendVersion {
-		return fmt.Errorf("indexing SP tweak data requires bitcoind "+
-			"v30.0 or later, but the backend reports version %d",
-			version)
+// data derived from previous outputs.
+func verifyPrevOutBackendVersion(version int32) error {
+	if version < minPrevOutBackendVersion {
+		return fmt.Errorf("indexing SP tweak data or custom filters "+
+			"requires bitcoind v30.0 or later, but the backend "+
+			"reports version %d", version)
 	}
 
 	return nil
