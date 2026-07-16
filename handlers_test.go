@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/stretchr/testify/require"
 )
 
@@ -261,4 +262,62 @@ func TestFilterSingleMemoryPath(t *testing.T) {
 			t, rec.Body.String(), "greater than current height",
 		)
 	})
+}
+
+// TestCurrentStatus checks the /status response assembly, in particular the
+// custom filter fields and their effect on all_files_synced.
+func TestCurrentStatus(t *testing.T) {
+	const tip = int32(42)
+
+	h2h := newH2HCache(nil)
+	h2h.heightToHash[tip] = chainhash.Hash{0x01}
+	h2h.bestHeight.Store(tip)
+
+	s := &server{
+		chainParams: &testParams,
+		h2hCache:    h2h,
+		headerFiles: newHeaderFiles(
+			100, 6, nil, nil, "", &testParams, h2h,
+		),
+		cFilterFiles: newCFilterFiles(
+			100, 6, nil, nil, "", &testParams, h2h,
+		),
+	}
+	s.headerFiles.currentHeight.Store(tip)
+	s.headerFiles.filterHeaders[tip] = chainhash.Hash{0x02}
+	s.cFilterFiles.currentHeight.Store(tip)
+
+	// currentStatus expects the h2hCache read lock to be held.
+	s.h2hCache.RLock()
+	defer s.h2hCache.RUnlock()
+
+	// Without the custom filter producer running, the status must report
+	// custom filters as unavailable and ignore them for the sync flag.
+	status, err := s.currentStatus()
+	require.NoError(t, err)
+	require.False(t, status.CustomFiltersAvailable)
+	require.EqualValues(t, 0, status.BestCustomFilterHeight)
+	require.True(t, status.AllFilesSynced)
+
+	// A synced custom filter producer is reported with its height and
+	// keeps the sync flag intact.
+	s.customFilterFiles = newCustomFilterFiles(
+		100, 200, 6, nil, nil, "", &testParams, h2h, nil,
+	)
+	s.customFilterFiles.currentHeight.Store(tip)
+
+	status, err = s.currentStatus()
+	require.NoError(t, err)
+	require.True(t, status.CustomFiltersAvailable)
+	require.Equal(t, tip, status.BestCustomFilterHeight)
+	require.True(t, status.AllFilesSynced)
+
+	// A lagging custom filter producer must flip the sync flag.
+	s.customFilterFiles.currentHeight.Store(tip - 1)
+
+	status, err = s.currentStatus()
+	require.NoError(t, err)
+	require.True(t, status.CustomFiltersAvailable)
+	require.Equal(t, tip-1, status.BestCustomFilterHeight)
+	require.False(t, status.AllFilesSynced)
 }

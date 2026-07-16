@@ -55,6 +55,18 @@ var (
 		"SP tweak data indexing is turned off",
 	)
 
+	// errUnavailableCustomFiltersTurnedOff is an error indicating that
+	// the custom filter indexing is turned off.
+	errUnavailableCustomFiltersTurnedOff = errors.New(
+		"custom filter indexing is turned off",
+	)
+
+	// errUnknownCustomFilterType is an error indicating that the
+	// requested custom filter type doesn't exist.
+	errUnknownCustomFilterType = errors.New(
+		"unknown custom filter type",
+	)
+
 	// errStillStartingUp is an error indicating that the server is still
 	// starting up and not ready to serve requests yet.
 	errStillStartingUp = errors.New(
@@ -139,10 +151,18 @@ func (s *server) createRouter() *mux.Router {
 		"/filter-headers/import/{height:[0-9]+}",
 		s.filterHeadersImportRequestHandler,
 	)
+	router.HandleFunc(
+		"/filter-headers/type/{filterType}/{height:[0-9]+}",
+		s.customFilterHeadersRequestHandler,
+	)
 	router.HandleFunc("/filters/{height:[0-9]+}", s.filtersRequestHandler)
 	router.HandleFunc(
 		"/filters/single/{height:[0-9]+}",
 		s.filterSingleRequestHandler,
+	)
+	router.HandleFunc(
+		"/filters/type/{filterType}/{height:[0-9]+}",
+		s.customFiltersRequestHandler,
 	)
 	router.HandleFunc(
 		"/sp/tweak-data/{height:[0-9]+}",
@@ -180,21 +200,33 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 	s.h2hCache.RLock()
 	defer s.h2hCache.RUnlock()
 
-	bestHeight := s.headerFiles.getCurrentHeight()
-	bestBlock, err := s.h2hCache.getBlockHash(bestHeight)
+	status, err := s.currentStatus()
 	if err != nil {
 		sendError(w, status500, errInvalidSyncStatus)
 		return
 	}
 
+	sendJSON(w, status, maxAgeMemory)
+}
+
+// currentStatus assembles the /status response from the current state of the
+// producers. The caller must hold the h2hCache read lock.
+func (s *server) currentStatus() (*Status, error) {
+	bestHeight := s.headerFiles.getCurrentHeight()
+	bestBlock, err := s.h2hCache.getBlockHash(bestHeight)
+	if err != nil {
+		return nil, err
+	}
+
 	bestFilter, ok := s.headerFiles.filterHeaderAtHeight(bestHeight)
 	if !ok {
-		sendError(w, status500, errInvalidSyncStatus)
-		return
+		return nil, fmt.Errorf("no filter header at height %d",
+			bestHeight)
 	}
 
 	var (
 		spHeight     int32
+		customHeight int32
 		filterHeight = s.cFilterFiles.currentHeight.Load()
 		allSynced    = bestHeight == filterHeight
 	)
@@ -203,23 +235,29 @@ func (s *server) statusRequestHandler(w http.ResponseWriter, _ *http.Request) {
 		allSynced = allSynced && bestHeight == spHeight
 	}
 
-	status := &Status{
-		Version:               version,
-		Commit:                Commit,
-		ChainGenesisHash:      s.chainParams.GenesisHash.String(),
-		ChainName:             s.chainParams.Name,
-		BestBlockHeight:       bestHeight,
-		BestBlockHash:         bestBlock.String(),
-		BestFilterHeight:      filterHeight,
-		BestFilterHeader:      bestFilter.String(),
-		BestSPTweakHeight:     spHeight,
-		EntriesPerHeaderFile:  s.headersPerFile,
-		EntriesPerFilterFile:  s.filtersPerFile,
-		EntriesPerSPTweakFile: s.spTweaksPerFile,
-		AllFilesSynced:        allSynced,
+	customAvailable := s.customFilterFiles != nil
+	if customAvailable {
+		customHeight = s.customFilterFiles.currentHeight.Load()
+		allSynced = allSynced && bestHeight == customHeight
 	}
 
-	sendJSON(w, status, maxAgeMemory)
+	return &Status{
+		Version:                version,
+		Commit:                 Commit,
+		ChainGenesisHash:       s.chainParams.GenesisHash.String(),
+		ChainName:              s.chainParams.Name,
+		BestBlockHeight:        bestHeight,
+		BestBlockHash:          bestBlock.String(),
+		BestFilterHeight:       filterHeight,
+		BestFilterHeader:       bestFilter.String(),
+		BestSPTweakHeight:      spHeight,
+		CustomFiltersAvailable: customAvailable,
+		BestCustomFilterHeight: customHeight,
+		EntriesPerHeaderFile:   s.headersPerFile,
+		EntriesPerFilterFile:   s.filtersPerFile,
+		EntriesPerSPTweakFile:  s.spTweaksPerFile,
+		AllFilesSynced:         allSynced,
+	}, nil
 }
 
 func (s *server) headersRequestHandler(w http.ResponseWriter, r *http.Request) {
@@ -291,6 +329,82 @@ func (s *server) filtersRequestHandler(w http.ResponseWriter, r *http.Request) {
 		w, r, FilterFileDir, FilterFileNamePattern,
 		int64(s.filtersPerFile), s.cFilterFiles.serializeFilters,
 		s.cFilterFiles.filtersSize, s.cFilterFiles,
+	)
+}
+
+// customFilterConfig resolves the {filterType} route variable to a custom
+// filter configuration index, writing the appropriate error response if the
+// custom filter producer isn't running or the type doesn't exist.
+func (s *server) customFilterConfig(w http.ResponseWriter,
+	r *http.Request) (string, int, bool) {
+
+	if s.customFilterFiles == nil {
+		sendError(w, status503, errUnavailableCustomFiltersTurnedOff)
+		return "", 0, false
+	}
+
+	filterType := mux.Vars(r)["filterType"]
+	cfgIndex, ok := customFilterConfigIndex(filterType)
+	if !ok {
+		err := fmt.Errorf("%w: %s", errUnknownCustomFilterType,
+			filterType)
+		sendError(w, status400, err)
+		return "", 0, false
+	}
+
+	return filterType, cfgIndex, true
+}
+
+// customFiltersRequestHandler serves /filters/type/{filterType}/{height}:
+// the batched filter files of one output-type-restricted filter set, in the
+// same format as the basic /filters/{height} endpoint.
+func (s *server) customFiltersRequestHandler(w http.ResponseWriter,
+	r *http.Request) {
+
+	filterType, cfgIndex, ok := s.customFilterConfig(w, r)
+	if !ok {
+		return
+	}
+
+	s.heightBasedRequestHandler(
+		w, r, customFilterDir(filterType), FilterFileNamePattern,
+		int64(s.filtersPerFile),
+		func(w io.Writer, startIndex, endIndex int32) error {
+			return s.customFilterFiles.serializeFilters(
+				w, cfgIndex, startIndex, endIndex,
+			)
+		},
+		func(startIndex, endIndex int32) (int64, bool) {
+			return s.customFilterFiles.filtersSize(
+				cfgIndex, startIndex, endIndex,
+			)
+		},
+		s.customFilterFiles,
+	)
+}
+
+// customFilterHeadersRequestHandler serves the endpoint
+// /filter-headers/type/{filterType}/{height}: the batched filter header
+// files of one output-type-restricted filter set, in the same format (and
+// with the same entries per file) as the basic /filter-headers/{height}
+// endpoint.
+func (s *server) customFilterHeadersRequestHandler(w http.ResponseWriter,
+	r *http.Request) {
+
+	filterType, cfgIndex, ok := s.customFilterConfig(w, r)
+	if !ok {
+		return
+	}
+
+	s.heightBasedRequestHandler(
+		w, r, customHeaderDir(filterType), FilterHeaderFileNamePattern,
+		int64(s.headersPerFile),
+		func(w io.Writer, startIndex, endIndex int32) error {
+			return s.customFilterFiles.serializeFilterHeaders(
+				w, cfgIndex, startIndex, endIndex,
+			)
+		},
+		s.customFilterFiles.filterHeadersSize, s.customFilterFiles,
 	)
 }
 

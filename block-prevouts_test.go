@@ -80,7 +80,7 @@ func TestParseSpentTxOuts(t *testing.T) {
 // same result as the getblock verbosity 3 RPC, and that the fetcher falls
 // back to the RPC when the backend's REST API isn't reachable.
 func TestBlockPrevOutFetcher(t *testing.T) {
-	miner, backend, backendCfg, _ := setupBackend(t, unitTestDir)
+	miner, backend, backendCfg, _ := setupBackend(t)
 
 	// Create a transaction spending miner outputs, so the next block
 	// contains a non-coinbase transaction with previous output data.
@@ -311,13 +311,13 @@ func TestBlockPrefetcherFailedPrefetch(t *testing.T) {
 			"prefetch")
 }
 
-// TestVerifySPTweakBackendVersion pins the minimum backend version required
+// TestVerifyPrevOutBackendVersion pins the minimum backend version required
 // for indexing SP tweak data.
-func TestVerifySPTweakBackendVersion(t *testing.T) {
-	require.Error(t, verifySPTweakBackendVersion(250_000))
-	require.Error(t, verifySPTweakBackendVersion(299_900))
-	require.NoError(t, verifySPTweakBackendVersion(300_000))
-	require.NoError(t, verifySPTweakBackendVersion(310_100))
+func TestVerifyPrevOutBackendVersion(t *testing.T) {
+	require.Error(t, verifyPrevOutBackendVersion(250_000))
+	require.Error(t, verifyPrevOutBackendVersion(299_900))
+	require.NoError(t, verifyPrevOutBackendVersion(300_000))
+	require.NoError(t, verifyPrevOutBackendVersion(310_100))
 }
 
 // TestGetBlockWithPrevOuts checks that fetching a block through the getblock
@@ -325,7 +325,7 @@ func TestVerifySPTweakBackendVersion(t *testing.T) {
 // getblock RPC, and that the previous output scripts collected from the undo
 // data match the outputs of the referenced transactions.
 func TestGetBlockWithPrevOuts(t *testing.T) {
-	miner, backend, _, _ := setupBackend(t, unitTestDir)
+	miner, backend, _, _ := setupBackend(t)
 
 	// Create a transaction spending miner outputs, so the next block
 	// contains a non-coinbase transaction with previous output data.

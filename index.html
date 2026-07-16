@@ -239,6 +239,25 @@
                 </td>
             </tr>
             <tr>
+                <td>
+                    <code>/filter-headers/type/&lt;filter_type&gt;/&lt;start_block&gt;</code>
+                </td>
+                <td>
+                    Returns a binary file containing 100'000 compact filter
+                    headers of one of the output-type-restricted filter sets
+                    (<code>segwit</code> [combination of all three following
+                    types], <code>p2wpkh</code>,
+                    <code>p2wsh</code> or <code>p2tr</code>), serialized the
+                    same way as <code>/filter-headers</code>. Only available
+                    if the server indexes custom filters.
+                </td>
+                <td>
+                    <a href="https://block-dn.org/filter-headers/type/segwit/100000">
+                        block-dn.org/filter-headers/type/segwit/100000
+                    </a>
+                </td>
+            </tr>
+            <tr>
                 <td><code>/filters/&lt;start_block&gt;</code></td>
                 <td>
                     Returns a binary file containing 2'000 compact filters,
@@ -268,6 +287,28 @@
                 <td>
                     <a href="https://block-dn.org/filters/single/802123">
                         block-dn.org/filters/single/802123
+                    </a>
+                </td>
+            </tr>
+            <tr>
+                <td>
+                    <code>/filters/type/&lt;filter_type&gt;/&lt;start_block&gt;</code>
+                </td>
+                <td>
+                    Returns a binary file containing 2'000 compact filters of
+                    one of the output-type-restricted filter sets
+                    (<code>segwit</code> [combination of all three following
+                    types], <code>p2wpkh</code>,
+                    <code>p2wsh</code> or <code>p2tr</code>), serialized the
+                    same way as <code>/filters</code>. These filters use the
+                    same parameters as the BIP-0158 basic filters but only
+                    include output scripts of the given types, making them
+                    significantly smaller. Only available if the server
+                    indexes custom filters.
+                </td>
+                <td>
+                    <a href="https://block-dn.org/filters/type/segwit/802000">
+                        block-dn.org/filters/type/segwit/802000
                     </a>
                 </td>
             </tr>
