@@ -390,8 +390,8 @@ tool (
 
 // Needed for the Silent Payments library.
 replace (
-	github.com/btcsuite/btcd/psbt/v2 => github.com/guggero/btcd/psbt/v2 v2.0.0-20260714114027-afaa92a22021
-	github.com/btcsuite/btcd/silentpayments => github.com/guggero/btcd/silentpayments v0.0.0-20260714114027-afaa92a22021
+	github.com/btcsuite/btcd/psbt/v2 => github.com/guggero/btcd/psbt/v2 v2.0.0-20260717100223-2fcde9a76a3e
+	github.com/btcsuite/btcd/silentpayments => github.com/guggero/btcd/silentpayments v0.0.0-20260717100223-2fcde9a76a3e
 )
 
 // Needed for the Silent Payments PSBT wallet support.
