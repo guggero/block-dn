@@ -1,7 +1,5 @@
 package main
 
-import "fmt"
-
 type Status struct {
 	Version                string `json:"version"`
 	Commit                 string `json:"commit"`
@@ -24,38 +22,4 @@ type FeeRate struct {
 	FeeSatPerKVByte  int64 `json:"fee_sat_per_kvbyte"`
 	FeeSatPerKWeight int64 `json:"fee_sat_per_kweight"`
 	FeeSatPerVByte   int64 `json:"fee_sat_per_vbyte"`
-}
-
-type SPTweakBlock map[int32]string
-
-type SPTweakFile struct {
-	StartHeight int32          `json:"start_height"`
-	NumBlocks   int32          `json:"num_blocks"`
-	Blocks      []SPTweakBlock `json:"blocks"`
-}
-
-func (f *SPTweakFile) TweakAtHeight(height int32) (SPTweakBlock, error) {
-	var empty SPTweakBlock
-	if height < 0 {
-		return empty, fmt.Errorf("height must be non-negative")
-	}
-
-	if height < f.StartHeight {
-		return empty, fmt.Errorf("height %d out of range (%d to %d)",
-			height, f.StartHeight, f.StartHeight+f.NumBlocks-1)
-	}
-
-	if height >= f.StartHeight+f.NumBlocks {
-		return empty, fmt.Errorf("height %d out of range (%d to %d)",
-			height, f.StartHeight, f.StartHeight+f.NumBlocks-1)
-	}
-
-	if int(f.NumBlocks) != len(f.Blocks) {
-		return empty, fmt.Errorf("internal error: NumBlocks %d does "+
-			"not match length of Blocks slice %d", f.NumBlocks,
-			len(f.Blocks))
-	}
-
-	blockIndex := height - f.StartHeight
-	return f.Blocks[blockIndex], nil
 }

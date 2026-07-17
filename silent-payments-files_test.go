@@ -80,8 +80,15 @@ func TestSPTweakDataFilesUpdate(t *testing.T) {
 	// Wait until the backend is fully synced to the miner.
 	waitBackendSync(t, backend, miner)
 
-	// First run: start from scratch.
+	// First run: start from scratch. A leftover file of the legacy JSON
+	// format must be ignored (with a warning) and not interfere with the
+	// producer's resume logic.
 	dataDir := t.TempDir()
+	spDir := filepath.Join(dataDir, SPTweakFileDir)
+	require.NoError(t, os.MkdirAll(spDir, DirectoryMode))
+	legacyFile := fmt.Sprintf(SPTweakFileNamePattern, spDir, 0, 1999)
+	require.NoError(t, os.WriteFile(legacyFile, []byte("{}"), 0644))
+
 	quit := make(chan struct{})
 	h2hCache := newH2HCache(backend)
 	hf := newSPTweakFiles(
@@ -95,17 +102,16 @@ func TestSPTweakDataFilesUpdate(t *testing.T) {
 	// Wait for the initial blocks to be written.
 	waitForTargetHeight(t, &wg, hf, initialBlocks)
 
-	// Check files.
-	spDir := filepath.Join(dataDir, SPTweakFileDir)
-	files, err := os.ReadDir(spDir)
-	require.NoError(t, err)
-	require.Len(t, files, 4)
+	// The startup-era blocks contain no Silent Payments eligible
+	// transactions, so every sealed file is the self-describing header
+	// plus one zero count byte per block, for every dust filter level.
+	checkSPTweakDataFiles(t, dataDir, 0, 99)
+	checkSPTweakDataFiles(t, dataDir, 100, 199)
+	checkSPTweakDataFiles(t, dataDir, 200, 299)
+	checkSPTweakDataFiles(t, dataDir, 300, 399)
 
-	// Check file names and sizes.
-	checkSPTweakDataFileFiles(t, spDir, 0, 99, 547)
-	checkSPTweakDataFileFiles(t, spDir, 100, 199, 549)
-	checkSPTweakDataFileFiles(t, spDir, 200, 299, 549)
-	checkSPTweakDataFileFiles(t, spDir, 300, 399, 549)
+	// The legacy file must still be there, untouched.
+	checkFile(t, legacyFile, 2)
 
 	// Stop the service.
 	close(quit)
@@ -128,26 +134,28 @@ func TestSPTweakDataFilesUpdate(t *testing.T) {
 	// Wait for the final blocks to be written.
 	waitForTargetHeight(t, &wg, hf, finalBlocks)
 
-	// Check files again.
-	files, err = os.ReadDir(spDir)
-	require.NoError(t, err)
-	require.Len(t, files, 5)
-
-	// Check new file names and sizes.
-	checkSPTweakDataFileFiles(t, spDir, 400, 499, 549)
+	// Check the new file of every dust filter level.
+	checkSPTweakDataFiles(t, dataDir, 400, 499)
 
 	// Stop the service.
 	close(quit)
 	wg.Wait()
 }
 
-func checkSPTweakDataFileFiles(t *testing.T, filterDir string, start, end int32,
-	size int64) {
+// checkSPTweakDataFiles asserts that the sealed SP tweak data file covering
+// [start, end] exists for every dust filter level, with the size of a file
+// of empty blocks: the self-describing header plus one zero count byte per
+// block.
+func checkSPTweakDataFiles(t *testing.T, dataDir string, start, end int32) {
+	t.Helper()
 
-	checkFile(
-		t, fmt.Sprintf(SPTweakFileNamePattern, filterDir, start, end),
-		size,
-	)
+	emptySize := int64(spTweakFileHeaderSize + tweakBlocksPerFile)
+	for _, dustLimit := range spTweakDustLimits {
+		spDir := filepath.Join(dataDir, spTweakDustDir(dustLimit))
+		checkFile(t, fmt.Sprintf(
+			SPTweakFileNamePattern, spDir, start, end,
+		), emptySize)
+	}
 }
 
 func TestSilentPaymentsDetection(t *testing.T) {
@@ -265,10 +273,16 @@ func TestSilentPaymentsDetection(t *testing.T) {
 	blockData := hf.tweakData[spHeight]
 
 	// The tweak data for the block should have exactly one entry, since the
-	// coinbase transaction isn't a silent payment.
+	// coinbase transaction isn't a silent payment. The entry's max output
+	// value must reflect the 250k sat taproot output, so the tweak is
+	// present in every dust filter level.
 	require.Len(t, blockData, 1)
-	txData, ok := blockData[1]
-	require.True(t, ok, "expected tx index 1 in block data")
+	require.GreaterOrEqual(
+		t, blockData[0].maxValue, uint64(250_000),
+	)
+
+	txData, err := btcec.ParsePubKey(blockData[0].tweak[:])
+	require.NoError(t, err)
 
 	spOutputKeys, err := sp.TransactionOutputKeysForFilter(
 		*txData, []sp.ScanAddress{

@@ -1,11 +1,9 @@
 package main
 
 import (
-	"encoding/hex"
-	"encoding/json"
+	"encoding/binary"
 	"fmt"
 	"io"
-	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,11 +11,11 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/blockchain"
-	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/rpcclient"
 	sp "github.com/btcsuite/btcd/silentpayments"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 )
 
@@ -31,6 +29,17 @@ const (
 	SPTweakFileSuffix             = ".sptweak"
 	SPTweakFileNamePattern        = "%s/block-%07d-%07d.sptweak"
 	SPTweakFileNameExtractPattern = "block-[0-9]{7}-([0-9]{7})\\.sptweak"
+
+	// spTweakFileVersion is the current version of the binary SP tweak
+	// data file format.
+	spTweakFileVersion = byte(0)
+
+	// spTweakFileHeaderSize is the size of the self-describing metadata
+	// prefix of an SP tweak data file: 4 bytes network magic (uint32
+	// little endian), 1 byte format version, 1 byte file type, 4 bytes
+	// start height (uint32 little endian) and 8 bytes dust limit (uint64
+	// little endian).
+	spTweakFileHeaderSize = 4 + 1 + 1 + 4 + 8
 )
 
 var (
@@ -43,15 +52,69 @@ var (
 		chaincfg.SigNetParams.Net:   1,
 	}
 
+	// spTweakDustLimits are the dust filter levels the SP tweak data is
+	// materialized and served at, in satoshis. A transaction's tweak is
+	// included in a level if the largest value among the transaction's
+	// taproot outputs is strictly greater than the level's value; level
+	// zero therefore contains every tweak. The non-zero values are
+	// thresholds observed in real-world usage: 600 and 1000 sats cover
+	// the typical inscription "postage" outputs (330-546 sats) and 3750
+	// sats is the 90th percentile of the taproot UTXO value
+	// distribution.
+	spTweakDustLimits = []uint64{0, 600, 1000, 3750}
+
 	spTweakFileNameExtractRegex = regexp.MustCompile(
 		SPTweakFileNameExtractPattern,
 	)
 )
 
+// spTweakDustDir returns the directory (relative to the base directory) the
+// SP tweak data files of the given dust limit are stored in.
+func spTweakDustDir(dustLimit uint64) string {
+	return filepath.Join(SPTweakFileDir, fmt.Sprintf("dust-%d", dustLimit))
+}
+
+// isValidSPTweakDustLimit returns whether the given value is one of the dust
+// filter levels the SP tweak data is materialized at.
+func isValidSPTweakDustLimit(dustLimit uint64) bool {
+	return slices.Contains(spTweakDustLimits, dustLimit)
+}
+
+// writeSPTweakFileHeader writes the metadata prefix of an SP tweak data
+// file, which makes every file (and range response) self-describing: the
+// network it belongs to, the format version, the file type, the height of
+// the first block it covers and the dust limit its tweaks are filtered by.
+func writeSPTweakFileHeader(w io.Writer, net wire.BitcoinNet,
+	startHeight int32, dustLimit uint64) error {
+
+	var header [spTweakFileHeaderSize]byte
+	binary.LittleEndian.PutUint32(header[0:4], uint32(net))
+	header[4] = spTweakFileVersion
+	header[5] = typeSPTweaks
+	binary.LittleEndian.PutUint32(header[6:10], uint32(startHeight))
+	binary.LittleEndian.PutUint64(header[10:18], dustLimit)
+
+	_, err := w.Write(header[:])
+	return err
+}
+
+// spTweakEntry is the tweak key of a single Silent Payments eligible
+// transaction, together with the largest value among the transaction's
+// taproot outputs, which the dust filter levels select on.
+type spTweakEntry struct {
+	tweak    [33]byte
+	maxValue uint64
+}
+
 type spTweakFiles struct {
 	producerBase
 
-	tweakData map[int32]map[int32]*btcec.PublicKey
+	// tweakData holds, per unsealed height, the tweak entries of the
+	// block's Silent Payments eligible transactions, in transaction
+	// order. Heights without any eligible transactions hold a nil slice;
+	// the key still exists so serialization can tell "empty block" from
+	// "height not ingested".
+	tweakData map[int32][]spTweakEntry
 
 	// heightToHash mirrors cFilterFiles: see the comment there. SP
 	// tweak entries are keyed by height and don't carry a block hash,
@@ -88,7 +151,7 @@ func newSPTweakFiles(itemsPerFile, reOrgSafeDepth int32,
 	taprootStartHeight, taprootSupported := TaprootActivationHeights[chainParams.Net]
 
 	s := &spTweakFiles{
-		tweakData:    make(map[int32]map[int32]*btcec.PublicKey),
+		tweakData:    make(map[int32][]spTweakEntry),
 		heightToHash: make(map[int32]chainhash.Hash),
 		blockFetcher: newBlockPrefetcher(
 			blockFetcher, h2hCache,
@@ -98,13 +161,17 @@ func newSPTweakFiles(itemsPerFile, reOrgSafeDepth int32,
 		taprootSupported:   taprootSupported,
 	}
 	s.producerBase = producerBase{
-		quit:           quit,
-		chain:          chain,
-		h2hCache:       h2hCache,
-		chainParams:    chainParams,
-		name:           "SP tweak data",
-		baseDir:        baseDir,
-		subDir:         SPTweakFileDir,
+		quit:        quit,
+		chain:       chain,
+		h2hCache:    h2hCache,
+		chainParams: chainParams,
+		name:        "SP tweak data",
+		baseDir:     baseDir,
+
+		// The unfiltered level's directory doubles as the resume
+		// directory; see writeSealedFile for the invariant that makes
+		// this safe.
+		subDir:         spTweakDustDir(spTweakDustLimits[0]),
 		fileSuffix:     SPTweakFileSuffix,
 		extractRegex:   spTweakFileNameExtractRegex,
 		entriesPerFile: itemsPerFile,
@@ -124,7 +191,9 @@ func newSPTweakFiles(itemsPerFile, reOrgSafeDepth int32,
 // updateFiles shadows producerBase.updateFiles so we can short-circuit when
 // the active network doesn't support Taproot — SP tweak indexing is a
 // no-op in that case, but the server still expects the producer goroutine
-// to exist and to be queryable. We log loudly and idle until shutdown.
+// to exist and to be queryable. We log loudly and idle until shutdown. It
+// also creates the per-dust-level directories (the base only creates the
+// resume directory) and warns about files of the legacy JSON format.
 func (s *spTweakFiles) updateFiles(numBlocks int32) error {
 	if !s.taprootSupported {
 		log.Warnf("Silent Payments tweak data indexing enabled, but "+
@@ -140,6 +209,28 @@ func (s *spTweakFiles) updateFiles(numBlocks int32) error {
 		return errServerShutdown
 	}
 
+	spDir := filepath.Join(s.baseDir, SPTweakFileDir)
+	for _, dustLimit := range spTweakDustLimits {
+		path := filepath.Join(s.baseDir, spTweakDustDir(dustLimit))
+		if err := os.MkdirAll(path, DirectoryMode); err != nil {
+			return fmt.Errorf("error creating directory %s: %w",
+				path, err)
+		}
+	}
+
+	// Files of the legacy JSON format lived directly in the silent
+	// payments directory; the binary dust level files live in
+	// sub-directories, so any leftovers are simply ignored.
+	legacyFiles, err := listFiles(spDir, SPTweakFileSuffix)
+	if err != nil {
+		return fmt.Errorf("error listing %s: %w", spDir, err)
+	}
+	if len(legacyFiles) > 0 {
+		log.Warnf("Found %d legacy JSON SP tweak data files in %s; "+
+			"they are ignored and should be deleted",
+			len(legacyFiles), spDir)
+	}
+
 	return s.producerBase.updateFiles(numBlocks)
 }
 
@@ -151,13 +242,13 @@ func (s *spTweakFiles) ingest(height int32) error {
 	}
 
 	s.Lock()
-	s.tweakData[height] = make(map[int32]*btcec.PublicKey)
+	s.tweakData[height] = nil
 	s.heightToHash[height] = *hash
 	s.Unlock()
 
 	// Pre-Taproot blocks can't contain Silent Payment outputs, so we
 	// only ingest the empty tweakData entry above so sealReadyFiles
-	// can serialize a coherent JSON file.
+	// can serialize a coherent file.
 	if height < s.taprootStartHeight {
 		return nil
 	}
@@ -180,13 +271,26 @@ func (s *spTweakFiles) ingest(height int32) error {
 	return nil
 }
 
+// writeSealedFile writes the tweak data file of every dust filter level for
+// the just-sealed range. The unfiltered level's file is written last: its
+// directory is the producer's resume directory, so its file must only
+// appear on disk once all other files of the batch are durable. A crash in
+// between re-ingests the whole batch on restart and rewrites all files.
 func (s *spTweakFiles) writeSealedFile(fileStart, fileEnd int32) error {
-	spDir := filepath.Join(s.baseDir, s.subDir)
-	fileName := fmt.Sprintf(SPTweakFileNamePattern, spDir, fileStart,
-		fileEnd)
+	for _, dustLimit := range slices.Backward(spTweakDustLimits) {
+		spDir := filepath.Join(s.baseDir, spTweakDustDir(dustLimit))
+		fileName := fmt.Sprintf(
+			SPTweakFileNamePattern, spDir, fileStart, fileEnd,
+		)
 
-	if err := s.writeSPTweaks(fileName, fileStart, fileEnd); err != nil {
-		return err
+		err := createAndWrite(fileName, func(w io.Writer) error {
+			return s.serializeSPTweaks(
+				w, dustLimit, fileStart, fileEnd,
+			)
+		})
+		if err != nil {
+			return err
+		}
 	}
 
 	// Log the indexing throughput now that we've written another batch of
@@ -225,11 +329,12 @@ func (s *spTweakFiles) cachedHash(height int32) (chainhash.Hash, bool) {
 
 // indexBlockSPTweakData examines the given block for transactions that
 // contain Taproot outputs. For each such transaction, we compute the Silent
-// Payments tweak data and store it in the provided index map, keyed by the
-// transaction index within the block.
+// Payments tweak data and store it, in transaction order, together with the
+// largest taproot output value of the transaction.
 func (s *spTweakFiles) indexBlockSPTweakData(height int32,
 	block *blockWithPrevOuts) error {
 
+	entries := make([]spTweakEntry, 0, len(block.txs))
 	for txIndex, tx := range block.txs {
 		// Skip coinbase transactions, they can't contain Silent Payment
 		// outputs.
@@ -254,92 +359,113 @@ func (s *spTweakFiles) indexBlockSPTweakData(height int32,
 			continue
 		}
 
-		// Store the tweak data for this transaction index.
-		s.Lock()
-		s.tweakData[height][int32(txIndex)] = tweakPubKey
-		s.Unlock()
-	}
-
-	return nil
-}
-
-func (s *spTweakFiles) writeSPTweaks(fileName string, startIndex,
-	endIndex int32) error {
-
-	s.RLock()
-	defer s.RUnlock()
-
-	log.Debugf("Writing SP tweak data file %s", fileName)
-	file, err := os.Create(fileName)
-	if err != nil {
-		return fmt.Errorf("error creating file %s: %w", fileName, err)
-	}
-
-	defer func() {
-		err = file.Close()
-		if err != nil {
-			log.Errorf("Error closing file %s: %w", fileName, err)
-		}
-	}()
-
-	return s.serializeSPTweakDataLocked(file, startIndex, endIndex)
-}
-
-func (s *spTweakFiles) serializeSPTweakData(w io.Writer, startIndex,
-	endIndex int32) error {
-
-	s.RLock()
-	defer s.RUnlock()
-
-	return s.serializeSPTweakDataLocked(w, startIndex, endIndex)
-}
-
-func (s *spTweakFiles) serializeSPTweakDataLocked(w io.Writer, startIndex,
-	endIndex int32) error {
-
-	// We need to add plus one here since the end index is inclusive in the
-	// for loop below (j <= endIndex).
-	numBlocks := endIndex - startIndex + 1
-
-	spTweakFile := &SPTweakFile{
-		StartHeight: startIndex,
-		NumBlocks:   numBlocks,
-		Blocks:      make([]SPTweakBlock, 0, numBlocks),
-	}
-	for j := startIndex; j <= endIndex; j++ {
-		transactionTweaks, ok := s.tweakData[j]
-		if !ok {
-			return fmt.Errorf("invalid height %d", j)
-		}
-
-		if len(transactionTweaks) == 0 {
-			spTweakFile.Blocks = append(spTweakFile.Blocks, nil)
-
-			continue
-		}
-
-		txIndexes := slices.Collect(maps.Keys(transactionTweaks))
-		slices.Sort(txIndexes)
-
-		block := make(SPTweakBlock, len(transactionTweaks))
-		for _, txIndex := range txIndexes {
-			pubKey := transactionTweaks[txIndex]
-			if pubKey == nil {
-				return fmt.Errorf("nil pubkey for height %d "+
-					"tx index %d", j, txIndex)
+		// Only taproot outputs can be Silent Payment outputs, so the
+		// dust filter levels select on the largest taproot output
+		// value of the transaction.
+		var maxValue uint64
+		for _, txOut := range tx.TxOut {
+			if !txscript.IsPayToTaproot(txOut.PkScript) {
+				continue
 			}
 
-			block[txIndex] = hex.EncodeToString(
-				pubKey.SerializeCompressed(),
-			)
+			maxValue = max(maxValue, uint64(txOut.Value))
 		}
-		spTweakFile.Blocks = append(spTweakFile.Blocks, block)
+
+		entry := spTweakEntry{maxValue: maxValue}
+		copy(entry.tweak[:], tweakPubKey.SerializeCompressed())
+		entries = append(entries, entry)
 	}
 
-	err := json.NewEncoder(w).Encode(spTweakFile)
+	if len(entries) == 0 {
+		return nil
+	}
+
+	s.Lock()
+	s.tweakData[height] = entries
+	s.Unlock()
+
+	return nil
+}
+
+// serializeSPTweaks writes the binary SP tweak data of the given dust filter
+// level for [startIndex, endIndex] to w: the self-describing file header,
+// then for every block in the range a compact-size count followed by that
+// many 33-byte compressed tweak keys. Block heights are implied by position,
+// so a block without (matching) tweaks is a single zero byte.
+func (s *spTweakFiles) serializeSPTweaks(w io.Writer, dustLimit uint64,
+	startIndex, endIndex int32) error {
+
+	s.RLock()
+	defer s.RUnlock()
+
+	err := writeSPTweakFileHeader(
+		w, s.chainParams.Net, startIndex, dustLimit,
+	)
 	if err != nil {
-		return fmt.Errorf("error writing SP tweak data: %w", err)
+		return fmt.Errorf("error writing SP tweak file header: %w",
+			err)
+	}
+
+	for j := startIndex; j <= endIndex; j++ {
+		entries, ok := s.tweakData[j]
+		if !ok {
+			return fmt.Errorf("missing SP tweak data at height "+
+				"%d", j)
+		}
+
+		count := uint64(0)
+		for _, entry := range entries {
+			if entry.maxValue > dustLimit {
+				count++
+			}
+		}
+
+		if err := wire.WriteVarInt(w, 0, count); err != nil {
+			return fmt.Errorf("error writing SP tweak count: %w",
+				err)
+		}
+
+		for _, entry := range entries {
+			if entry.maxValue <= dustLimit {
+				continue
+			}
+
+			if _, err := w.Write(entry.tweak[:]); err != nil {
+				return fmt.Errorf("error writing SP tweak: "+
+					"%w", err)
+			}
+		}
 	}
 
 	return nil
+}
+
+// spTweaksSize returns the exact serialized size of the binary SP tweak
+// data of the given dust filter level in [startIndex, endIndex], or false
+// if any of the heights is missing from the in-memory tail.
+func (s *spTweakFiles) spTweaksSize(dustLimit uint64, startIndex,
+	endIndex int32) (int64, bool) {
+
+	s.RLock()
+	defer s.RUnlock()
+
+	total := int64(spTweakFileHeaderSize)
+	for j := startIndex; j <= endIndex; j++ {
+		entries, ok := s.tweakData[j]
+		if !ok {
+			return 0, false
+		}
+
+		count := uint64(0)
+		for _, entry := range entries {
+			if entry.maxValue > dustLimit {
+				count++
+			}
+		}
+
+		total += int64(wire.VarIntSerializeSize(count)) +
+			int64(count)*33
+	}
+
+	return total, true
 }
