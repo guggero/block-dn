@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -905,6 +907,78 @@ func testSPTweakData(t *testing.T, ctx *testContext) {
 			hex.EncodeToString(key2.SerializeCompressed()),
 		)
 	}
+
+	// The SP tweak data is JSON, so it must be served with the proper
+	// content type and — since the payload compresses well — with gzip
+	// compression for clients that ask for it. Fetch the sealed file
+	// once identity-encoded and once compressed and compare.
+	identityBody, identityHeaders, status := ctx.fetchWithHeaders(
+		t, "sp/tweak-data/0",
+		map[string]string{"Accept-Encoding": "identity"},
+	)
+	require.Equal(t, http.StatusOK, status)
+	require.Equal(
+		t, "application/json", identityHeaders.Get("Content-Type"),
+	)
+	require.Empty(t, identityHeaders.Get("Content-Encoding"))
+	require.Equal(t, "Accept-Encoding", identityHeaders.Get("Vary"))
+
+	gzipBody, gzipHeaders, status := ctx.fetchWithHeaders(
+		t, "sp/tweak-data/0",
+		map[string]string{"Accept-Encoding": "gzip"},
+	)
+	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, "application/json", gzipHeaders.Get("Content-Type"))
+	require.Equal(t, "gzip", gzipHeaders.Get("Content-Encoding"))
+	require.Equal(t, "Accept-Encoding", gzipHeaders.Get("Vary"))
+	require.Less(t, len(gzipBody), len(identityBody))
+
+	gzReader, err := gzip.NewReader(bytes.NewReader(gzipBody))
+	require.NoError(t, err)
+	unzipped, err := io.ReadAll(gzReader)
+	require.NoError(t, err)
+	require.Equal(t, identityBody, unzipped)
+
+	// The memory-served tail must be compressible the same way.
+	gzipBody, gzipHeaders, status = ctx.fetchWithHeaders(
+		t, fmt.Sprintf("sp/tweak-data/%d", startHeight),
+		map[string]string{"Accept-Encoding": "gzip"},
+	)
+	require.Equal(t, http.StatusOK, status)
+	require.Equal(t, "application/json", gzipHeaders.Get("Content-Type"))
+	require.Equal(t, "gzip", gzipHeaders.Get("Content-Encoding"))
+	require.Equal(t, cacheMemory, gzipHeaders.Get(HeaderCache))
+
+	gzReader, err = gzip.NewReader(bytes.NewReader(gzipBody))
+	require.NoError(t, err)
+	unzipped, err = io.ReadAll(gzReader)
+	require.NoError(t, err)
+	var tailTweakData SPTweakFile
+	require.NoError(t, json.Unmarshal(unzipped, &tailTweakData))
+	require.Equal(t, int32(startHeight), tailTweakData.StartHeight)
+
+	// Range requests are always served identity-encoded, since byte
+	// ranges refer to the unencoded representation.
+	rangeBody, rangeHeaders, status := ctx.fetchWithHeaders(
+		t, "sp/tweak-data/0", map[string]string{
+			"Accept-Encoding": "gzip",
+			"Range":           "bytes=0-9",
+		},
+	)
+	require.Equal(t, http.StatusPartialContent, status)
+	require.Empty(t, rangeHeaders.Get("Content-Encoding"))
+	require.Equal(t, identityBody[:10], rangeBody)
+
+	// Binary endpoints declare their content type but stay uncompressed,
+	// even for gzip-accepting clients.
+	_, binHeaders, status := ctx.fetchWithHeaders(
+		t, "filters/0", map[string]string{"Accept-Encoding": "gzip"},
+	)
+	require.Equal(t, http.StatusOK, status)
+	require.Equal(
+		t, "application/octet-stream", binHeaders.Get("Content-Type"),
+	)
+	require.Empty(t, binHeaders.Get("Content-Encoding"))
 
 	// We mine an empty block to ensure that the following tests can assume
 	// empty blocks again.
