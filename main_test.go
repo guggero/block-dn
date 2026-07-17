@@ -2,8 +2,8 @@ package main
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -18,7 +18,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
 	"github.com/btcsuite/btcd/chaincfg/v2"
@@ -350,6 +349,11 @@ func testErrors(t *testing.T, ctx *testContext) {
 			status: 400,
 			error:  "unknown custom filter type: bogus",
 		}
+		respBadDustLimit = errorResponse{
+			status: 400,
+			error: "unknown dust limit: 42, supported values: " +
+				"[0 600 1000 3750]",
+		}
 	)
 	errorCases := map[string]errorResponse{
 		"foo":                                   respNotFound,
@@ -381,6 +385,10 @@ func testErrors(t *testing.T, ctx *testContext) {
 		"filter-headers/type/segwit":            respNotFound,
 		"filter-headers/type/bogus/0":           respBadFilterType,
 		"filter-headers/type/segwit/1":          respBadStartHeight1,
+		"sp/tweak-data/0":                       respNotFound,
+		"sp/tweaks/600":                         respNotFound,
+		"sp/tweaks/42/0":                        respBadDustLimit,
+		"sp/tweaks/600/1":                       respBadStartHeight1,
 		"block":                                 respNotFound,
 		"block/aaaa":                            respBadHashLength,
 		"block/" + badHash:                      respNotFound,
@@ -781,34 +789,40 @@ func testFilterHeadersImportLatest(t *testing.T, ctx *testContext) {
 		"last filter header in latest response must match bitcoind")
 }
 
+// testSPTweakData exercises the /sp/tweaks/<dust>/<height> endpoint: the
+// binary format of the sealed files served from disk and the unsealed tail
+// served from memory, the dust filter levels and their boundary semantics,
+// and the correctness of the served tweak keys.
 func testSPTweakData(t *testing.T, ctx *testContext) {
-	var spTweakData SPTweakFile
-	headers := ctx.fetchJSON(t, "sp/tweak-data/0", &spTweakData)
-	require.Equal(t, int32(0), spTweakData.StartHeight)
-	require.Equal(
-		t, int32(DefaultRegtestSPTweaksPerFile), spTweakData.NumBlocks,
-	)
-	require.Len(t, spTweakData.Blocks, int(spTweakData.NumBlocks))
+	// The sealed file of the unfiltered level: empty startup-era blocks,
+	// so every block contributes a single zero count byte.
+	body, headers := ctx.fetchBinary(t, "sp/tweaks/0/0")
+	tweaks := parseSPTweakResponse(t, body, 0, 0)
+	require.Len(t, tweaks, DefaultRegtestSPTweaksPerFile)
 
 	require.Contains(t, headers, HeaderCache)
 	require.Equal(t, cacheDisk, headers.Get(HeaderCache))
 	require.Equal(t, "*", headers.Get(HeaderCORS))
+	require.Equal(
+		t, "application/octet-stream", headers.Get("Content-Type"),
+	)
 
 	// And now we try to fetch all SP tweak data up to the current height,
-	// which will require some of them to be served from memory.
+	// which is served from memory and must announce its exact size.
 	const startHeight = DefaultRegtestSPTweaksPerFile
-	headers = ctx.fetchJSON(
-		t, fmt.Sprintf("sp/tweak-data/%d", startHeight), &spTweakData,
+	body, headers = ctx.fetchBinary(
+		t, fmt.Sprintf("sp/tweaks/0/%d", startHeight),
 	)
 	expectedBlocks := totalInitialBlocks - startHeight + 1
-	require.Equal(
-		t, int32(expectedBlocks), spTweakData.NumBlocks,
-	)
-	require.Len(t, spTweakData.Blocks, int(expectedBlocks))
+	tweaks = parseSPTweakResponse(t, body, startHeight, 0)
+	require.Len(t, tweaks, int(expectedBlocks))
 
 	require.Contains(t, headers, HeaderCache)
 	require.Equal(t, cacheMemory, headers.Get(HeaderCache))
 	require.Equal(t, "*", headers.Get(HeaderCORS))
+	require.Equal(
+		t, strconv.Itoa(len(body)), headers.Get("Content-Length"),
+	)
 
 	// Now we mine some blocks with Taproot outputs to ensure we have
 	// Taproot tweaks in the SP tweak data.
@@ -844,147 +858,133 @@ func testSPTweakData(t *testing.T, ctx *testContext) {
 		ctx.miner.MineBlocksAndAssertNumTxes(1, 2)
 	}
 
+	// Mine one more block with taproot outputs sitting exactly on the
+	// dust filter boundaries: values equal to a level must be filtered
+	// by that level (dust means "at most this value").
+	boundaryValues := []int64{600, 1000, 3750, 100_000}
+	for _, value := range boundaryValues {
+		ctx.miner.SendOutput(&wire.TxOut{
+			Value:    value,
+			PkScript: psbt.SilentPaymentDummyP2TROutput,
+		}, 2)
+	}
+	ctx.miner.MineBlocksAndAssertNumTxes(1, len(boundaryValues))
+
 	ctx.waitBackendSync(t)
 	ctx.waitFilesSync(t)
 
-	headers = ctx.fetchJSON(
-		t, fmt.Sprintf("sp/tweak-data/%d", startHeight), &spTweakData,
-	)
-	expectedHeight := totalInitialBlocks + numTrBlocks
+	expectedHeight := totalInitialBlocks + numTrBlocks + 1
 	expectedBlocks = expectedHeight - DefaultRegtestSPTweaksPerFile + 1
-	require.Equal(
-		t, int32(expectedBlocks), spTweakData.NumBlocks,
+
+	// The unfiltered level must contain two tweaks for each of the SP
+	// blocks mined above and four for the boundary block; the last block
+	// before them must be empty.
+	body, _ = ctx.fetchBinary(
+		t, fmt.Sprintf("sp/tweaks/0/%d", startHeight),
 	)
-	require.Len(t, spTweakData.Blocks, int(expectedBlocks))
+	tweaks = parseSPTweakResponse(t, body, startHeight, 0)
+	require.Len(t, tweaks, int(expectedBlocks))
 
-	require.Contains(t, headers, HeaderCache)
-	require.Equal(t, cacheMemory, headers.Get(HeaderCache))
-	require.Equal(t, "*", headers.Get(HeaderCORS))
+	blockAt := func(tweaks [][][]byte, height uint32) [][]byte {
+		return tweaks[int32(height)-startHeight]
+	}
 
-	// We expect the last block before the Taproot blocks to not have any
-	// Taproot tweaks.
-	noTrHeight := expectedHeight - numTrBlocks
-	noTrBlock, err := spTweakData.TweakAtHeight(int32(noTrHeight))
-	require.NoError(t, err)
-	require.Empty(t, noTrBlock)
+	noTrHeight := expectedHeight - numTrBlocks - 1
+	require.Empty(t, blockAt(tweaks, noTrHeight))
 
-	// Check the actual tweaks in the last 20 blocks.
-	loopStart := expectedHeight - numTrBlocks + 1
-	for height := loopStart; height <= expectedHeight; height++ {
-		trBlock, err := spTweakData.TweakAtHeight(int32(height))
-		require.NoError(t, err)
-
-		require.Len(t, trBlock, 2)
-		require.Lenf(
-			t, trBlock[1],
-			hex.EncodedLen(btcec.PubKeyBytesLenCompressed),
-			"block %d, index 1", height,
-		)
-		require.Lenf(
-			t, trBlock[2],
-			hex.EncodedLen(btcec.PubKeyBytesLenCompressed),
-			"block %d, index 2", height,
-		)
+	// Check the actual tweaks in the 20 SP blocks against an independent
+	// computation from the raw block data.
+	for height := noTrHeight + 1; height < expectedHeight; height++ {
+		trBlock := blockAt(tweaks, height)
+		require.Lenf(t, trBlock, 2, "block %d", height)
 
 		block := ctx.blockAtHeight(t, int32(height))
 		require.Len(t, block.Transactions, 3)
 
-		key1, err := sp.TransactionTweakData(
-			block.Transactions[1], ctx.fetchPrevOutScript, log,
-		)
-		require.NoError(t, err)
-		require.Equal(
-			t, trBlock[1],
-			hex.EncodeToString(key1.SerializeCompressed()),
-		)
-
-		key2, err := sp.TransactionTweakData(
-			block.Transactions[2], ctx.fetchPrevOutScript, log,
-		)
-		require.NoError(t, err)
-		require.Equal(
-			t, trBlock[2],
-			hex.EncodeToString(key2.SerializeCompressed()),
-		)
+		for txIndex := 1; txIndex <= 2; txIndex++ {
+			key, err := sp.TransactionTweakData(
+				block.Transactions[txIndex],
+				ctx.fetchPrevOutScript, log,
+			)
+			require.NoError(t, err)
+			require.Equalf(
+				t, key.SerializeCompressed(),
+				trBlock[txIndex-1], "block %d, tx %d",
+				height, txIndex,
+			)
+		}
 	}
 
-	// The SP tweak data is JSON, so it must be served with the proper
-	// content type and — since the payload compresses well — with gzip
-	// compression for clients that ask for it. Fetch the sealed file
-	// once identity-encoded and once compressed and compare.
-	identityBody, identityHeaders, status := ctx.fetchWithHeaders(
-		t, "sp/tweak-data/0",
-		map[string]string{"Accept-Encoding": "identity"},
-	)
-	require.Equal(t, http.StatusOK, status)
-	require.Equal(
-		t, "application/json", identityHeaders.Get("Content-Type"),
-	)
-	require.Empty(t, identityHeaders.Get("Content-Encoding"))
-	require.Equal(t, "Accept-Encoding", identityHeaders.Get("Vary"))
+	// The boundary block must shrink with every dust filter level:
+	// values equal to the level are considered dust, so with levels
+	// 0/600/1000/3750 the block's values 600/1000/3750/100k leave
+	// 4/3/2/1 tweaks.
+	for i, dustLimit := range spTweakDustLimits {
+		body, _ = ctx.fetchBinary(t, fmt.Sprintf(
+			"sp/tweaks/%d/%d", dustLimit, startHeight,
+		))
+		tweaks = parseSPTweakResponse(t, body, startHeight, dustLimit)
 
-	gzipBody, gzipHeaders, status := ctx.fetchWithHeaders(
-		t, "sp/tweak-data/0",
-		map[string]string{"Accept-Encoding": "gzip"},
-	)
-	require.Equal(t, http.StatusOK, status)
-	require.Equal(t, "application/json", gzipHeaders.Get("Content-Type"))
-	require.Equal(t, "gzip", gzipHeaders.Get("Content-Encoding"))
-	require.Equal(t, "Accept-Encoding", gzipHeaders.Get("Vary"))
-	require.Less(t, len(gzipBody), len(identityBody))
+		boundaryBlock := blockAt(tweaks, expectedHeight)
+		require.Lenf(
+			t, boundaryBlock, len(boundaryValues)-i,
+			"dust limit %d", dustLimit,
+		)
 
-	gzReader, err := gzip.NewReader(bytes.NewReader(gzipBody))
-	require.NoError(t, err)
-	unzipped, err := io.ReadAll(gzReader)
-	require.NoError(t, err)
-	require.Equal(t, identityBody, unzipped)
-
-	// The memory-served tail must be compressible the same way.
-	gzipBody, gzipHeaders, status = ctx.fetchWithHeaders(
-		t, fmt.Sprintf("sp/tweak-data/%d", startHeight),
-		map[string]string{"Accept-Encoding": "gzip"},
-	)
-	require.Equal(t, http.StatusOK, status)
-	require.Equal(t, "application/json", gzipHeaders.Get("Content-Type"))
-	require.Equal(t, "gzip", gzipHeaders.Get("Content-Encoding"))
-	require.Equal(t, cacheMemory, gzipHeaders.Get(HeaderCache))
-
-	gzReader, err = gzip.NewReader(bytes.NewReader(gzipBody))
-	require.NoError(t, err)
-	unzipped, err = io.ReadAll(gzReader)
-	require.NoError(t, err)
-	var tailTweakData SPTweakFile
-	require.NoError(t, json.Unmarshal(unzipped, &tailTweakData))
-	require.Equal(t, int32(startHeight), tailTweakData.StartHeight)
-
-	// Range requests are always served identity-encoded, since byte
-	// ranges refer to the unencoded representation.
-	rangeBody, rangeHeaders, status := ctx.fetchWithHeaders(
-		t, "sp/tweak-data/0", map[string]string{
-			"Accept-Encoding": "gzip",
-			"Range":           "bytes=0-9",
-		},
-	)
-	require.Equal(t, http.StatusPartialContent, status)
-	require.Empty(t, rangeHeaders.Get("Content-Encoding"))
-	require.Equal(t, identityBody[:10], rangeBody)
-
-	// Binary endpoints declare their content type but stay uncompressed,
-	// even for gzip-accepting clients.
-	_, binHeaders, status := ctx.fetchWithHeaders(
-		t, "filters/0", map[string]string{"Accept-Encoding": "gzip"},
-	)
-	require.Equal(t, http.StatusOK, status)
-	require.Equal(
-		t, "application/octet-stream", binHeaders.Get("Content-Type"),
-	)
-	require.Empty(t, binHeaders.Get("Content-Encoding"))
+		// The filtered levels are strict subsets of the unfiltered
+		// level, and every empty block still costs exactly one byte.
+		require.Empty(t, blockAt(tweaks, noTrHeight))
+	}
 
 	// We mine an empty block to ensure that the following tests can assume
 	// empty blocks again.
 	ctx.miner.MineEmptyBlocks(1)
 	ctx.waitBackendSync(t)
 	ctx.waitFilesSync(t)
+}
+
+// parseSPTweakResponse decodes a binary SP tweak data response: it verifies
+// the self-describing header against the expected start height and dust
+// limit and returns the 33-byte tweak keys, grouped per block in the order
+// they were served.
+func parseSPTweakResponse(t *testing.T, body []byte, expStartHeight int64,
+	expDustLimit uint64) [][][]byte {
+
+	t.Helper()
+
+	require.GreaterOrEqual(t, len(body), spTweakFileHeaderSize)
+
+	header := body[:spTweakFileHeaderSize]
+	require.Equal(
+		t, uint32(unittest.NetParams.Net),
+		binary.LittleEndian.Uint32(header[0:4]),
+	)
+	require.Equal(t, spTweakFileVersion, header[4])
+	require.Equal(t, typeSPTweaks, header[5])
+	require.EqualValues(
+		t, expStartHeight, binary.LittleEndian.Uint32(header[6:10]),
+	)
+	require.Equal(
+		t, expDustLimit, binary.LittleEndian.Uint64(header[10:18]),
+	)
+
+	reader := bytes.NewReader(body[spTweakFileHeaderSize:])
+	var blocks [][][]byte
+	for reader.Len() > 0 {
+		count, err := wire.ReadVarInt(reader, 0)
+		require.NoError(t, err)
+
+		var tweaks [][]byte
+		for range count {
+			tweak := make([]byte, 33)
+			_, err := io.ReadFull(reader, tweak)
+			require.NoError(t, err)
+			tweaks = append(tweaks, tweak)
+		}
+		blocks = append(blocks, tweaks)
+	}
+
+	return blocks
 }
 
 func testBlock(t *testing.T, ctx *testContext) {

@@ -215,7 +215,9 @@ func main() {
 		"Indicates if the server should index BIP-0352 Silent "+
 			"Payments tweak data that allows light clients to "+
 			"scan the chain for inbound SP more efficiently; "+
-			"this requires every block since the activation of "+
+			"the tweaks are served as binary files at four dust "+
+			"filter levels (0, 600, 1000 and 3750 sats); this "+
+			"requires every block since the activation of "+
 			"Taproot to be indexed which may take a while; "+
 			"requires bitcoind v30.0 or later with the REST API "+
 			"enabled (rest=1)",

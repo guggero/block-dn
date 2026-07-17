@@ -313,30 +313,21 @@
                 </td>
             </tr>
             <tr>
-                <td><code>/sp/tweak-data/&lt;start_block&gt;</code></td>
                 <td>
-                    Returns a JSON file containing Silent Payment tweak data
-                    entries for transactions of 2'000 blocks, using the
-                    following format:<br />
-                    <pre>
-    {
-      "start_height": &lt;start_block&gt;,
-      "num_blocks": 2000,
-      "blocks": [
-        {
-          "&lt;tx_index 1&gt;": "02a1633f5b1c4e8...",
-          "&lt;tx_index x&gt;": "03cdefa84923dc8..."
-        },
-        {
-          ...
-        }
-      ]
-    }
-                    </pre>
+                    <code>/sp/tweaks/&lt;dust_limit&gt;/&lt;start_block&gt;</code>
                 </td>
                 <td>
-                    <a href="https://block-dn.org/sp/tweak-data/802000">
-                        block-dn.org/sp/tweak-data/802000
+                    Returns a binary file containing BIP-0352 Silent Payment
+                    tweak keys for the transactions of 2'000 blocks, filtered
+                    by one of the supported dust limits (<code>0</code>,
+                    <code>600</code>, <code>1000</code> or <code>3750</code>
+                    satoshis). See
+                    <a href="#sp-tweak-format">SP tweak data file format</a>
+                    below for the exact serialization.
+                </td>
+                <td>
+                    <a href="https://block-dn.org/sp/tweaks/1000/802000">
+                        block-dn.org/sp/tweaks/1000/802000
                     </a>
                 </td>
             </tr>
@@ -422,6 +413,48 @@
                 </td>
             </tr>
         </table>
+    </section>
+    <section id="sp-tweak-format">
+        <h2>SP tweak data file format</h2>
+        <p>
+            The <code>/sp/tweaks</code> endpoint serves BIP-0352 Silent
+            Payment tweak keys (the 33-byte compressed public key
+            <code>tweak = input_hash·A</code> of every eligible transaction)
+            as compact binary files. Every response — whether it comes from a
+            sealed file on disk or from the server's in-memory tail — starts
+            with an 18-byte header, followed by one record per block, in
+            ascending height order:
+        </p>
+        <pre>
+    header:
+        4 bytes   network magic (uint32, little endian)
+        1 byte    format version (currently 0)
+        1 byte    file type (2 = SP tweak data)
+        4 bytes   height of the first block (uint32, little endian)
+        8 bytes   dust limit in satoshis (uint64, little endian)
+
+    per block (height implied by position):
+        varint    number of tweak keys (Bitcoin CompactSize)
+        N x 33 bytes   compressed tweak public keys, in transaction order
+    </pre>
+        <p>
+            A block without eligible transactions is encoded as a single zero
+            byte. Each file covers 2'000 blocks, so a block's record is found
+            by walking the counts from the file's start height.
+        </p>
+        <p>
+            The dust limit in the URL selects one of the pre-computed filter
+            levels (<code>0</code>, <code>600</code>, <code>1000</code> or
+            <code>3750</code> satoshis): a transaction's tweak is included if
+            the largest value among its taproot outputs is strictly greater
+            than the dust limit. Level <code>0</code> therefore contains
+            every tweak, while the higher levels exclude transactions whose
+            taproot outputs are all uneconomical dust (such as inscription
+            postage), which shrinks the download substantially for the
+            spam-heavy block ranges. A wallet can scan quickly with a high
+            dust limit first and re-scan with a lower one if an expected
+            payment doesn't show up.
+        </p>
     </section>
     <section id="test-instances">
         <h2>Test instances</h2>

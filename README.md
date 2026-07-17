@@ -72,7 +72,7 @@ Flags:
   -h, --help                      help for block-dn
       --index-custom-filters      Indicates if the server should build custom output-type-restricted compact filters (four sets: segwit, p2wpkh, p2wsh, p2tr); adds about 8 GB more data as of block 950k; requires bitcoind v30.0 or later with the REST API enabled (rest=1)
       --index-page string         Full path to the index.html that should be used instead of the default one that comes with the project
-      --index-sp-tweak-data       Indicates if the server should index BIP-0352 Silent Payments tweak data that allows light clients to scan the chain for inbound SP more efficiently; this requires every block since the activation of Taproot to be indexed which may take a while; requires bitcoind v30.0 or later with the REST API enabled (rest=1)
+      --index-sp-tweak-data       Indicates if the server should index BIP-0352 Silent Payments tweak data that allows light clients to scan the chain for inbound SP more efficiently; the tweaks are served as binary files at four dust filter levels (0, 600, 1000 and 3750 sats); this requires every block since the activation of Taproot to be indexed which may take a while; requires bitcoind v30.0 or later with the REST API enabled (rest=1)
       --light-mode                Indicates if the server should run in light mode which creates no files on disk and therefore requires zero disk space; but only the status and block endpoints are available in this mode
       --listen-addr string        The local host:port to listen on (default "localhost:8080")
       --log-dir string            The log directory where the log file will be written (default ".")
@@ -86,3 +86,41 @@ Flags:
   -v, --version                   version for block-dn
       --write-timeout duration    The maximum duration for writing an HTTP response; must be generous enough for the largest filter file to be streamed to a slow direct (non-CDN) client (default 5m0s)
 ```
+
+## SP tweak data file format
+
+With `--index-sp-tweak-data` enabled, the server builds and serves BIP-0352
+Silent Payments tweak keys (the 33-byte compressed public key
+`tweak = input_hash·A` of every eligible transaction) as compact binary
+files, available through the `/sp/tweaks/<dust_limit>/<start_block>`
+endpoint.
+
+Every response — whether it comes from a sealed file on disk or from the
+server's in-memory tail — starts with an 18-byte header, followed by one
+record per block, in ascending height order:
+
+```text
+header:
+    4 bytes        network magic (uint32, little endian)
+    1 byte         format version (currently 0)
+    1 byte         file type (2 = SP tweak data)
+    4 bytes        height of the first block (uint32, little endian)
+    8 bytes        dust limit in satoshis (uint64, little endian)
+
+per block (height implied by position):
+    varint         number of tweak keys (Bitcoin CompactSize)
+    N x 33 bytes   compressed tweak public keys, in transaction order
+```
+
+A block without eligible transactions is encoded as a single zero byte. Each
+file covers 2'000 blocks, so a block's record is found by walking the counts
+from the file's start height.
+
+The dust limit in the URL selects one of the pre-computed filter levels (0,
+600, 1000 or 3750 satoshis): a transaction's tweak is included if the
+largest value among its taproot outputs is strictly greater than the dust
+limit. Level 0 therefore contains every tweak, while the higher levels
+exclude transactions whose taproot outputs are all uneconomical dust (such
+as inscription postage), which shrinks the download substantially for the
+spam-heavy block ranges. A wallet can scan quickly with a high dust limit
+first and re-scan with a lower one if an expected payment doesn't show up.

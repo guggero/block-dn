@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"compress/gzip"
 	_ "embed"
 	"encoding/binary"
 	"encoding/hex"
@@ -14,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/btcsuite/btcd/btcjson"
@@ -45,6 +43,10 @@ var (
 	// contains compact filter headers.
 	typeFilterHeader = byte(1)
 
+	// typeSPTweaks is the byte value used to indicate that the file
+	// contains Silent Payments tweak data.
+	typeSPTweaks = byte(2)
+
 	// errUnavailableInLightMode is an error indicating that a certain HTTP
 	// endpoint isn't available when running in light mode.
 	errUnavailableInLightMode = errors.New(
@@ -56,6 +58,11 @@ var (
 	errUnavailableSPTweakDataTurnedOff = errors.New(
 		"SP tweak data indexing is turned off",
 	)
+
+	// errUnknownDustLimit is an error indicating that the requested dust
+	// filter level isn't one of the levels the SP tweak data is
+	// materialized at.
+	errUnknownDustLimit = errors.New("unknown dust limit")
 
 	// errUnavailableCustomFiltersTurnedOff is an error indicating that
 	// the custom filter indexing is turned off.
@@ -112,13 +119,12 @@ const (
 	HeaderCORS        = "Access-Control-Allow-Origin"
 	HeaderCORSMethods = "Access-Control-Allow-Methods"
 
-	// contentTypeBinary and contentTypeJSON are the MIME types of the two
-	// kinds of content the file-serving endpoints produce. JSON content
-	// is also offered gzip-compressed, binary content is not: the filters
-	// are Golomb-Rice coded and the headers are hashes, so there's
-	// nothing left for a general-purpose compressor to gain.
+	// contentTypeBinary is the MIME type of the content the file-serving
+	// endpoints produce. None of it is compressible: the filters are
+	// Golomb-Rice coded, the headers are hashes and the SP tweaks are
+	// compressed public keys, so there's nothing for a general-purpose
+	// compressor to gain and no content encoding is offered.
 	contentTypeBinary = "application/octet-stream"
-	contentTypeJSON   = "application/json"
 
 	status400 = http.StatusBadRequest
 	status500 = http.StatusInternalServerError
@@ -175,8 +181,8 @@ func (s *server) createRouter() *mux.Router {
 		s.customFiltersRequestHandler,
 	)
 	router.HandleFunc(
-		"/sp/tweak-data/{height:[0-9]+}",
-		s.spTweakDataRequestHandler,
+		"/sp/tweaks/{dust:[0-9]+}/{height:[0-9]+}",
+		s.spTweaksRequestHandler,
 	)
 	router.HandleFunc("/block/{hash:[0-9a-f]+}", s.blockRequestHandler)
 	router.HandleFunc(
@@ -273,8 +279,7 @@ func (s *server) currentStatus() (*Status, error) {
 func (s *server) headersRequestHandler(w http.ResponseWriter, r *http.Request) {
 	s.heightBasedRequestHandler(
 		w, r, HeaderFileDir, HeaderFileNamePattern,
-		contentTypeBinary, int64(s.headersPerFile),
-		s.headerFiles.serializeHeaders,
+		int64(s.headersPerFile), s.headerFiles.serializeHeaders,
 		s.headerFiles.headersSize, s.headerFiles,
 	)
 }
@@ -308,8 +313,7 @@ func (s *server) filterHeadersRequestHandler(w http.ResponseWriter,
 
 	s.heightBasedRequestHandler(
 		w, r, HeaderFileDir, FilterHeaderFileNamePattern,
-		contentTypeBinary, int64(s.headersPerFile),
-		s.headerFiles.serializeFilterHeaders,
+		int64(s.headersPerFile), s.headerFiles.serializeFilterHeaders,
 		s.headerFiles.filterHeadersSize, s.headerFiles,
 	)
 }
@@ -339,8 +343,7 @@ func (s *server) filterHeadersImportLatestRequestHandler(w http.ResponseWriter,
 func (s *server) filtersRequestHandler(w http.ResponseWriter, r *http.Request) {
 	s.heightBasedRequestHandler(
 		w, r, FilterFileDir, FilterFileNamePattern,
-		contentTypeBinary, int64(s.filtersPerFile),
-		s.cFilterFiles.serializeFilters,
+		int64(s.filtersPerFile), s.cFilterFiles.serializeFilters,
 		s.cFilterFiles.filtersSize, s.cFilterFiles,
 	)
 }
@@ -381,7 +384,7 @@ func (s *server) customFiltersRequestHandler(w http.ResponseWriter,
 
 	s.heightBasedRequestHandler(
 		w, r, customFilterDir(filterType), FilterFileNamePattern,
-		contentTypeBinary, int64(s.filtersPerFile),
+		int64(s.filtersPerFile),
 		func(w io.Writer, startIndex, endIndex int32) error {
 			return s.customFilterFiles.serializeFilters(
 				w, cfgIndex, startIndex, endIndex,
@@ -411,7 +414,7 @@ func (s *server) customFilterHeadersRequestHandler(w http.ResponseWriter,
 
 	s.heightBasedRequestHandler(
 		w, r, customHeaderDir(filterType), FilterHeaderFileNamePattern,
-		contentTypeBinary, int64(s.headersPerFile),
+		int64(s.headersPerFile),
 		func(w io.Writer, startIndex, endIndex int32) error {
 			return s.customFilterFiles.serializeFilterHeaders(
 				w, cfgIndex, startIndex, endIndex,
@@ -488,7 +491,10 @@ func (s *server) filterSingleRequestHandler(w http.ResponseWriter,
 	sendRawBytes(w, filterBytes, maxAge)
 }
 
-func (s *server) spTweakDataRequestHandler(w http.ResponseWriter,
+// spTweaksRequestHandler serves /sp/tweaks/{dust}/{height}: the binary
+// Silent Payments tweak data files of one of the materialized dust filter
+// levels.
+func (s *server) spTweaksRequestHandler(w http.ResponseWriter,
 	r *http.Request) {
 
 	if s.spTweakFiles == nil {
@@ -496,13 +502,34 @@ func (s *server) spTweakDataRequestHandler(w http.ResponseWriter,
 		return
 	}
 
-	// SP tweak data is variable-size JSON, so no size callback: computing
-	// it would mean serializing twice.
+	dust, err := parseRequestParamInt64(r, "dust")
+	if err != nil {
+		sendError(w, status400, err)
+		return
+	}
+
+	dustLimit := uint64(dust)
+	if !isValidSPTweakDustLimit(dustLimit) {
+		sendError(w, status400, fmt.Errorf("%w: %d, supported "+
+			"values: %v", errUnknownDustLimit, dust,
+			spTweakDustLimits))
+		return
+	}
+
 	s.heightBasedRequestHandler(
-		w, r, SPTweakFileDir, SPTweakFileNamePattern,
-		contentTypeJSON, int64(s.spTweaksPerFile),
-		s.spTweakFiles.serializeSPTweakData,
-		nil, s.spTweakFiles,
+		w, r, spTweakDustDir(dustLimit), SPTweakFileNamePattern,
+		int64(s.spTweaksPerFile),
+		func(w io.Writer, startIndex, endIndex int32) error {
+			return s.spTweakFiles.serializeSPTweaks(
+				w, dustLimit, startIndex, endIndex,
+			)
+		},
+		func(startIndex, endIndex int32) (int64, bool) {
+			return s.spTweakFiles.spTweaksSize(
+				dustLimit, startIndex, endIndex,
+			)
+		},
+		s.spTweakFiles,
 	)
 }
 
@@ -547,8 +574,7 @@ func (s *server) estimateFeeRequestHandler(w http.ResponseWriter,
 }
 
 func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
-	r *http.Request, subDir, fileNamePattern, contentType string,
-	entriesPerFile int64,
+	r *http.Request, subDir, fileNamePattern string, entriesPerFile int64,
 	serializeCb func(w io.Writer, startIndex, endIndex int32) error,
 	sizeCb func(startIndex, endIndex int32) (int64, bool),
 	processor blockProcessor) {
@@ -576,15 +602,6 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 		return
 	}
 
-	// Compressible content produces encoding-dependent responses, which
-	// caches must key on — even when this particular response ends up
-	// being served uncompressed.
-	compressible := contentType == contentTypeJSON
-	if compressible {
-		w.Header().Add("Vary", "Accept-Encoding")
-	}
-	useGzip := compressible && acceptsGzip(r)
-
 	srcDir := filepath.Join(s.baseDir, subDir)
 	fileName := fmt.Sprintf(
 		fileNamePattern, srcDir, startHeight,
@@ -594,17 +611,12 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 		addCorsHeaders(w)
 		addCacheHeaders(w, maxAgeDisk)
 
-		if useGzip {
-			serveFileGzipped(w, fileName, contentType)
-			return
-		}
-
 		// Serving the sealed file through http.ServeContent gives
 		// clients Content-Length, Last-Modified/If-Modified-Since and
 		// HTTP range requests — the latter lets a browser client
 		// resume a large filter file download instead of restarting
 		// it.
-		serveFile(w, r, fileName, contentType)
+		serveFile(w, r, fileName)
 
 		return
 	}
@@ -619,86 +631,24 @@ func (s *server) heightBasedRequestHandler(w http.ResponseWriter,
 
 	// The requested start height wasn't yet in a file, so we need to
 	// stream the headers from memory. The exact response size is known
-	// for fixed-size entries (and cheaply computable for filters), so
-	// announce it where possible to let clients detect truncation; it
-	// refers to the identity encoding, so it's skipped for compressed
-	// responses.
+	// for fixed-size entries (and cheaply computable for the others), so
+	// announce it where possible to let clients detect truncation.
 	endHeight := processor.getCurrentHeight()
 	addCorsHeaders(w)
 	addCacheHeaders(w, maxAgeMemory)
-	w.Header().Set("Content-Type", contentType)
-	if sizeCb != nil && !useGzip {
+	w.Header().Set("Content-Type", contentTypeBinary)
+	if sizeCb != nil {
 		if size, ok := sizeCb(int32(startHeight), endHeight); ok {
 			w.Header().Set(
 				"Content-Length", strconv.FormatInt(size, 10),
 			)
 		}
 	}
-	if useGzip {
-		w.Header().Set("Content-Encoding", "gzip")
-	}
 	w.WriteHeader(http.StatusOK)
 
-	var out io.Writer = w
-	if useGzip {
-		gz := gzip.NewWriter(w)
-		defer func() {
-			if err := gz.Close(); err != nil {
-				log.Errorf("Error finishing gzip stream: %v",
-					err)
-			}
-		}()
-		out = gz
-	}
-
-	err = serializeCb(out, int32(startHeight), endHeight)
+	err = serializeCb(w, int32(startHeight), endHeight)
 	if err != nil {
 		log.Errorf("Error serializing: %v", err)
-	}
-}
-
-// acceptsGzip returns whether the client asked for a gzip-compressed
-// response. Range requests are always served identity-encoded, since byte
-// ranges refer to the unencoded representation of the content.
-func acceptsGzip(r *http.Request) bool {
-	if r.Header.Get("Range") != "" {
-		return false
-	}
-
-	return strings.Contains(r.Header.Get("Accept-Encoding"), "gzip")
-}
-
-// serveFileGzipped streams a file to the client through a gzip compressor.
-// Unlike serveFile it supports neither range requests nor conditional gets,
-// which is fine: the caller only picks this path for clients that asked for
-// compressed content without a byte range.
-func serveFileGzipped(w http.ResponseWriter, fileName, contentType string) {
-	f, err := os.Open(fileName)
-	if err != nil {
-		log.Errorf("Error opening file %s: %v", fileName, err)
-		sendError(w, status500, fmt.Errorf("error reading file"))
-		return
-	}
-
-	defer func() {
-		if err := f.Close(); err != nil {
-			log.Errorf("Error closing file %s: %v", fileName, err)
-		}
-	}()
-
-	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Encoding", "gzip")
-	w.WriteHeader(http.StatusOK)
-
-	gz := gzip.NewWriter(w)
-	if _, err := io.Copy(gz, f); err != nil {
-		log.Errorf("Error writing gzipped file %s: %v", fileName, err)
-		return
-	}
-
-	if err := gz.Close(); err != nil {
-		log.Errorf("Error finishing gzipped file %s: %v", fileName,
-			err)
 	}
 }
 
@@ -1296,9 +1246,7 @@ func streamFile(w io.Writer, fileName string) error {
 // Content-Length, Last-Modified/If-Modified-Since and range requests. Unlike
 // streamFile it must own the status code (206 for ranges), so callers must
 // not call WriteHeader themselves.
-func serveFile(w http.ResponseWriter, r *http.Request, fileName,
-	contentType string) {
-
+func serveFile(w http.ResponseWriter, r *http.Request, fileName string) {
 	f, err := os.Open(fileName)
 	if err != nil {
 		log.Errorf("Error opening file %s: %v", fileName, err)
@@ -1320,6 +1268,6 @@ func serveFile(w http.ResponseWriter, r *http.Request, fileName,
 		return
 	}
 
-	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Type", contentTypeBinary)
 	http.ServeContent(w, r, stat.Name(), stat.ModTime(), f)
 }
