@@ -13,6 +13,7 @@ import (
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
+	"github.com/lightningnetwork/lnd/lntest/unittest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -338,4 +339,100 @@ func TestCheckMemoryHeaders(t *testing.T) {
 	require.ErrorContains(t, v.checkMemoryHeaders(
 		data, 0, 1, chainhash.Hash{},
 	), "genesis")
+}
+
+// TestVerifyMemoryTail runs the verifier against a live server whose last
+// header range isn't sealed yet — the mainnet steady state, where filter
+// files seal every 2k blocks but header files only every 100k — so the tail
+// filter files can only be checked against in-memory filter headers.
+func TestVerifyMemoryTail(t *testing.T) {
+	params := reorgTestParams{
+		headersPerFile:  600,
+		filtersPerFile:  100,
+		spTweaksPerFile: 600,
+		reOrgSafeDepth:  6,
+	}
+	ctx := startReorgTestServer(t, params)
+
+	// Mine past the first header-file boundary (so file 0-599 seals) and
+	// far enough past it that a full filter file inside the second,
+	// still-unsealed header range seals too.
+	_, minerHeight := ctx.miner.GetBestBlock()
+	require.Less(t, minerHeight, int32(720))
+	_ = ctx.miner.MineEmptyBlocks(int(750 - minerHeight))
+	ctx.waitBackendSync(t)
+
+	waitForSealedHeight(t, ctx.server.headerFiles, 599)
+	waitForSealedHeight(t, ctx.server.cFilterFiles, 699)
+	waitForCurrentHeight(t, ctx.server.headerFiles, 750)
+	waitForCurrentHeight(t, ctx.server.cFilterFiles, 750)
+
+	serverURL, err := serverBaseURL(ctx.server.listenAddr)
+	require.NoError(t, err)
+
+	newVerifier := func(fix bool) *verifier {
+		return &verifier{
+			chain:          ctx.backend,
+			params:         unittest.NetParams,
+			baseDir:        ctx.server.baseDir,
+			headersPerFile: params.headersPerFile,
+			filtersPerFile: params.filtersPerFile,
+			fix:            fix,
+			reOrgSafeDepth: int32(params.reOrgSafeDepth),
+			serverURL:      serverURL,
+			httpClient: &http.Client{
+				Timeout: memoryFetchTimeout,
+			},
+			fHeaderCacheStart: -1,
+		}
+	}
+
+	runWalk := func(v *verifier) {
+		t.Helper()
+		require.NoError(t, v.verifyHeaderFiles())
+		require.NoError(t, v.verifyFilterFiles())
+	}
+
+	// A clean run: the sealed files verify against the disk data, the
+	// tail (headers 600-750, filter file 600-699) against the server's
+	// memory.
+	v := newVerifier(false)
+	runWalk(v)
+	require.Empty(t, v.badFiles)
+
+	// Corrupt a filter body byte of the sealed filter file inside the
+	// unsealed header range: it must be detected...
+	filterDir := filepath.Join(ctx.server.baseDir, FilterFileDir)
+	name := fmt.Sprintf(FilterFileNamePattern, filterDir, 600, 699)
+	data, err := os.ReadFile(name)
+	require.NoError(t, err)
+	data[1] ^= 0x01
+	require.NoError(t, os.WriteFile(name, data, 0o644))
+
+	v = newVerifier(false)
+	runWalk(v)
+	require.Equal(t, []string{name}, v.badFiles)
+
+	// ...and repaired from the backend in fix mode, even though its
+	// filter headers only exist in the server's memory.
+	v = newVerifier(true)
+	runWalk(v)
+	require.Empty(t, v.badFiles)
+	require.Equal(t, []string{name}, v.fixedFiles)
+
+	// An unparseable file (trailing garbage) is detected and repaired
+	// the same way.
+	data, err = os.ReadFile(name)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(name, append(data, 0xff), 0o644))
+
+	v = newVerifier(true)
+	runWalk(v)
+	require.Empty(t, v.badFiles)
+	require.Equal(t, []string{name}, v.fixedFiles)
+
+	// The final state verifies clean again.
+	v = newVerifier(false)
+	runWalk(v)
+	require.Empty(t, v.badFiles)
 }
