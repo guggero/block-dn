@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
@@ -14,13 +18,29 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// newVerifyCommand creates the "verify" subcommand: an offline integrity
-// check of all sealed files against each other and the backend chain, with
-// an optional --fix that regenerates corrupt files in place. This exists
+const (
+	// memoryHeadersRoute and memoryFilterHeadersRoute are the server's
+	// height-based HTTP routes (see createRouter) that serve unsealed
+	// ranges from memory.
+	memoryHeadersRoute       = "headers"
+	memoryFilterHeadersRoute = "filter-headers"
+)
+
+// memoryFetchTimeout bounds one in-memory range fetch from the running
+// server; even the largest possible response (a full header range) is only a
+// few MiB served from memory, so this is generous.
+var memoryFetchTimeout = 30 * time.Second
+
+// newVerifyCommand creates the "verify" subcommand: an integrity check of
+// all sealed files against each other and the backend chain, with an
+// optional --fix that regenerates corrupt files in place. This exists
 // because sealed files are advertised as immutable (year-long CDN caching),
 // so any historical corruption — e.g. a filter ingested from a reorged-away
 // block by a version that predates the seal-time verification — persists
-// until the operator repairs it.
+// until the operator repairs it. Filter files of the last, incomplete
+// header range have no sealed filter-header file to check against yet, so
+// their filter headers are fetched from the running server's memory (via
+// --listen-addr).
 func newVerifyCommand(cc *mainCommand) *cobra.Command {
 	var fix bool
 	cmd := &cobra.Command{
@@ -31,8 +51,11 @@ func newVerifyCommand(cc *mainCommand) *cobra.Command {
 			"genesis, backend anchors) and every sealed compact-" +
 			"filter file (BIP157 commitment chain closure " +
 			"against " +
-			"the filter-header files). Requires the same " +
-			"--base-dir, network and bitcoind flags as the " +
+			"the filter-header files). The unsealed tail range " +
+			"that only exists in the running block-dn server's " +
+			"memory (reached through the --listen-addr flag) is " +
+			"verified against the backend as well. Requires the " +
+			"same --base-dir, network and bitcoind flags as the " +
 			"server. SP tweak data files are not covered. After " +
 			"--fix, purge the CDN cache for the repaired URLs.",
 		RunE: func(_ *cobra.Command, _ []string) error {
@@ -56,19 +79,40 @@ type verifier struct {
 	filtersPerFile int32
 	fix            bool
 
+	// reOrgSafeDepth mirrors the server's --reorg-safe-depth: heights
+	// above tip minus this depth may legitimately still change, so they
+	// are never anchored against the backend.
+	reOrgSafeDepth int32
+
+	// serverURL is the base URL of the running block-dn server, derived
+	// from --listen-addr. Ranges that aren't sealed to disk yet only
+	// exist in that server's memory and are fetched from it over HTTP.
+	serverURL  string
+	httpClient *http.Client
+
 	badFiles   []string
 	fixedFiles []string
 
-	// fHeaderCache is the most recently loaded filter-header file, so
-	// per-range lookups don't re-read the same file over and over.
-	fHeaderCacheStart int32
-	fHeaderCache      []byte
+	// fHeaderCache is the most recently loaded filter-header range, so
+	// per-height lookups don't re-read the same file over and over.
+	// fHeaderCacheFromMemory marks a snapshot fetched from the running
+	// server instead of a sealed file: the server keeps indexing while
+	// we verify, so such a snapshot is refreshed instead of being
+	// declared truncated when the walk outgrows it.
+	fHeaderCacheStart      int32
+	fHeaderCache           []byte
+	fHeaderCacheFromMemory bool
 }
 
 func runVerify(cc *mainCommand, fix bool) error {
 	chainParams, headersPerFile, filtersPerFile, _ := cc.resolveNetwork()
 	if cc.baseDir == "" {
 		return fmt.Errorf("--base-dir must be set")
+	}
+
+	serverURL, err := serverBaseURL(cc.listenAddr)
+	if err != nil {
+		return err
 	}
 
 	client, err := rpcclient.New(cc.bitcoindConfig, nil)
@@ -78,14 +122,22 @@ func runVerify(cc *mainCommand, fix bool) error {
 	defer client.Shutdown()
 
 	v := &verifier{
-		chain:             client,
-		params:            chainParams,
-		baseDir:           cc.baseDir,
-		headersPerFile:    headersPerFile,
-		filtersPerFile:    filtersPerFile,
-		fix:               fix,
+		chain:          client,
+		params:         chainParams,
+		baseDir:        cc.baseDir,
+		headersPerFile: headersPerFile,
+		filtersPerFile: filtersPerFile,
+		fix:            fix,
+		reOrgSafeDepth: int32(cc.reOrgSafeDepth),
+		serverURL:      serverURL,
+		httpClient: &http.Client{
+			Timeout: memoryFetchTimeout,
+		},
 		fHeaderCacheStart: -1,
 	}
+
+	fmt.Printf("fetching unsealed ranges from the block-dn server at %s\n",
+		serverURL)
 
 	if err := v.verifyHeaderFiles(); err != nil {
 		return err
@@ -116,7 +168,8 @@ func runVerify(cc *mainCommand, fix bool) error {
 // the prev-hash linkage within and across files, the genesis block, and one
 // backend anchor per file end. The paired filter-header files are checked
 // for size and end anchor here; their interior is covered by the filter
-// chain closure in verifyFilterFiles.
+// chain closure in verifyFilterFiles. The unsealed tail range past the last
+// sealed file is verified against the running server's memory.
 func (v *verifier) verifyHeaderFiles() error {
 	headerDir := filepath.Join(v.baseDir, HeaderFileDir)
 
@@ -127,7 +180,9 @@ func (v *verifier) verifyHeaderFiles() error {
 			HeaderFileNamePattern, headerDir, start, end,
 		)
 		if !fileExists(name) {
-			return nil
+			// Everything past the sealed files only exists in
+			// the running server's memory.
+			return v.verifyMemoryTail(start, running)
 		}
 
 		err := v.verifyOneHeaderFile(name, start, end, &running)
@@ -277,6 +332,149 @@ func (v *verifier) verifyFilterHeaderAnchor(name string, start,
 	return nil
 }
 
+// verifyMemoryTail verifies the unsealed tail range that only exists in the
+// running server's memory: the block headers must continue the chain of the
+// last sealed file and anchor at the backend, and the filter headers must
+// anchor at the backend too. --fix can't repair this range — a divergence
+// means the server ingested a block that was later reorged away, and only a
+// restart (which re-indexes the unsealed range) heals its memory.
+func (v *verifier) verifyMemoryTail(start int32,
+	running chainhash.Hash) error {
+
+	headerData, err := v.fetchInMemory(memoryHeadersRoute, start)
+	if err != nil {
+		return err
+	}
+	if len(headerData) == 0 ||
+		len(headerData)%wire.MaxBlockHeaderPayload != 0 {
+
+		return fmt.Errorf("in-memory headers response has invalid "+
+			"length %d", len(headerData))
+	}
+	end := start + int32(len(headerData)/wire.MaxBlockHeaderPayload) - 1
+
+	numBad := len(v.badFiles)
+	err = v.checkMemoryHeaders(headerData, start, end, running)
+	if err != nil {
+		fmt.Printf("in-memory headers %d-%d: BAD (%v)\n", start, end,
+			err)
+		v.badFiles = append(v.badFiles, fmt.Sprintf(
+			"in-memory headers %d-%d", start, end,
+		))
+	} else {
+		fmt.Printf("in-memory headers %d-%d: OK\n", start, end)
+	}
+
+	fhData, err := v.fetchInMemory(memoryFilterHeadersRoute, start)
+	if err != nil {
+		return err
+	}
+	if len(fhData) == 0 || len(fhData)%chainhash.HashSize != 0 {
+		return fmt.Errorf("in-memory filter headers response has "+
+			"invalid length %d", len(fhData))
+	}
+	fhEnd := start + int32(len(fhData)/chainhash.HashSize) - 1
+
+	err = v.checkMemoryFilterHeaders(fhData, start, fhEnd)
+	if err != nil {
+		fmt.Printf("in-memory filter headers %d-%d: BAD (%v)\n",
+			start, fhEnd, err)
+		v.badFiles = append(v.badFiles, fmt.Sprintf(
+			"in-memory filter headers %d-%d", start, fhEnd,
+		))
+	} else {
+		fmt.Printf("in-memory filter headers %d-%d: OK\n", start,
+			fhEnd)
+	}
+
+	if v.fix && len(v.badFiles) > numBad {
+		fmt.Println("in-memory data can't be fixed; restart the " +
+			"block-dn server to re-index the unsealed range")
+	}
+
+	return nil
+}
+
+// checkMemoryHeaders verifies that the in-memory tail headers continue the
+// chain of the last sealed file (or start at genesis) and anchors the
+// highest reorg-safe height at the backend. The topmost reOrgSafeDepth
+// headers stay unanchored on purpose: they may legitimately still be
+// reorged away, and a spurious mismatch would read like corruption.
+func (v *verifier) checkMemoryHeaders(data []byte, start, end int32,
+	running chainhash.Hash) error {
+
+	var (
+		anchorHeight = end - v.reOrgSafeDepth
+		anchorHash   chainhash.Hash
+	)
+
+	prev := running
+	for height := start; height <= end; height++ {
+		offset := int(height-start) * wire.MaxBlockHeaderPayload
+		record := data[offset : offset+wire.MaxBlockHeaderPayload]
+
+		hash := chainhash.DoubleHashH(record)
+		if height == 0 {
+			if hash != *v.params.GenesisHash {
+				return fmt.Errorf("wrong genesis block")
+			}
+		} else if !bytes.Equal(record[4:36], prev[:]) {
+			return fmt.Errorf("header at height %d does not "+
+				"link to its predecessor", height)
+		}
+		prev = hash
+
+		if height == anchorHeight {
+			anchorHash = hash
+		}
+	}
+
+	if anchorHeight < start {
+		return nil
+	}
+
+	anchor, err := v.chain.GetBlockHash(int64(anchorHeight))
+	if err != nil {
+		return fmt.Errorf("error getting anchor: %w", err)
+	}
+	if anchorHash != *anchor {
+		return fmt.Errorf("header at height %d (%s) does not match "+
+			"the backend's block (%s)", anchorHeight, anchorHash,
+			anchor)
+	}
+
+	return nil
+}
+
+// checkMemoryFilterHeaders anchors the in-memory tail filter headers at the
+// backend at the highest reorg-safe height. Because a filter header commits
+// to all filters before it, a single anchor proves the whole chain below
+// it; the sealed filter files of the tail range additionally chain-close
+// against the individual values in verifyFilterFiles.
+func (v *verifier) checkMemoryFilterHeaders(data []byte, start,
+	end int32) error {
+
+	anchorHeight := end - v.reOrgSafeDepth
+	if anchorHeight < start {
+		return nil
+	}
+
+	authority, err := v.authFilterHeader(anchorHeight)
+	if err != nil {
+		return err
+	}
+
+	var stored chainhash.Hash
+	offset := int(anchorHeight-start) * chainhash.HashSize
+	copy(stored[:], data[offset:])
+	if stored != authority {
+		return fmt.Errorf("filter header at height %d does not "+
+			"match the backend", anchorHeight)
+	}
+
+	return nil
+}
+
 // verifyFilterFiles walks all sealed compact-filter files and verifies each
 // one exactly like a light client does: the BIP157 commitment chain over
 // the file's filters, anchored at the stored filter headers on both ends,
@@ -340,6 +538,16 @@ func (v *verifier) verifyOneFilterFile(name string, start, end int32) error {
 			FilterHeaderFileNamePattern, headerDir, fhStart,
 			fhStart+v.headersPerFile-1,
 		)
+
+		// An unsealed range's filter headers only exist in the
+		// running server's memory; there is no file to regenerate.
+		if !fileExists(fhName) {
+			return fmt.Errorf("filter headers of heights %d-%d "+
+				"diverge from the backend but aren't sealed "+
+				"to disk yet; restart the block-dn server to "+
+				"re-index them", start, end)
+		}
+
 		err := v.regenerate(
 			fhName, fhStart, fhStart+v.headersPerFile-1,
 			v.writeFilterHeaderRecord, "filter headers",
@@ -416,7 +624,13 @@ func (v *verifier) diagnoseRange(filters [][]byte, start, end int32) (bool,
 		if err != nil {
 			return false, false, err
 		}
-		if !bytes.Equal(filters[height-start], authFilter) {
+
+		// An unparseable filters file yields no entries to compare
+		// against; it (like any file shorter than its range) is the
+		// culprit by definition.
+		if int(height-start) >= len(filters) ||
+			!bytes.Equal(filters[height-start], authFilter) {
+
 			fmt.Printf("  filter at height %d diverges from "+
 				"the backend\n", height)
 			badFilters = true
@@ -440,35 +654,119 @@ func (v *verifier) diagnoseRange(filters [][]byte, start, end int32) (bool,
 	return badFilters, badFHeaders, nil
 }
 
-// storedFilterHeader reads the filter header at the given height from the
-// sealed filter-header files, caching the most recently loaded file.
+// storedFilterHeader returns the filter header at the given height, reading
+// it from the sealed filter-header files or, for a range that isn't sealed
+// yet, from the running server's memory, caching the most recently loaded
+// range.
 func (v *verifier) storedFilterHeader(height int32) (chainhash.Hash, error) {
 	var result chainhash.Hash
 
 	fileStart := height - (height % v.headersPerFile)
-	if v.fHeaderCacheStart != fileStart {
-		headerDir := filepath.Join(v.baseDir, HeaderFileDir)
-		name := fmt.Sprintf(
-			FilterHeaderFileNamePattern, headerDir, fileStart,
-			fileStart+v.headersPerFile-1,
-		)
-		data, err := os.ReadFile(name)
-		if err != nil {
-			return result, fmt.Errorf("error reading filter "+
-				"headers for height %d: %w", height, err)
+	for attempt := 0; ; attempt++ {
+		if v.fHeaderCacheStart != fileStart {
+			if err := v.loadFilterHeaders(fileStart); err != nil {
+				return result, fmt.Errorf("error loading "+
+					"filter headers for height %d: %w",
+					height, err)
+			}
 		}
-		v.fHeaderCache = data
-		v.fHeaderCacheStart = fileStart
+
+		offset := int(height-fileStart) * chainhash.HashSize
+		if offset+chainhash.HashSize <= len(v.fHeaderCache) {
+			copy(result[:], v.fHeaderCache[offset:])
+			return result, nil
+		}
+
+		// A memory-sourced snapshot may simply predate this height
+		// (the server keeps indexing while we verify), so refresh it
+		// once before giving up.
+		if !v.fHeaderCacheFromMemory || attempt > 0 {
+			return result, fmt.Errorf("filter header data for "+
+				"height %d is truncated", height)
+		}
+		v.fHeaderCacheStart = -1
+	}
+}
+
+// loadFilterHeaders fills the filter-header cache with the range starting at
+// fileStart, from the sealed file on disk if it exists or from the running
+// server's memory otherwise.
+func (v *verifier) loadFilterHeaders(fileStart int32) error {
+	headerDir := filepath.Join(v.baseDir, HeaderFileDir)
+	name := fmt.Sprintf(
+		FilterHeaderFileNamePattern, headerDir, fileStart,
+		fileStart+v.headersPerFile-1,
+	)
+
+	data, err := os.ReadFile(name)
+	switch {
+	case err == nil:
+		v.fHeaderCacheFromMemory = false
+
+	// The range isn't sealed yet, so its filter headers only exist in
+	// the running server's memory.
+	case os.IsNotExist(err):
+		data, err = v.fetchInMemory(memoryFilterHeadersRoute, fileStart)
+		if err != nil {
+			return err
+		}
+		v.fHeaderCacheFromMemory = true
+
+	default:
+		return err
 	}
 
-	offset := int(height-fileStart) * chainhash.HashSize
-	if offset+chainhash.HashSize > len(v.fHeaderCache) {
-		return result, fmt.Errorf("filter header file for height %d "+
-			"is truncated", height)
-	}
-	copy(result[:], v.fHeaderCache[offset:])
+	v.fHeaderCache = data
+	v.fHeaderCacheStart = fileStart
 
-	return result, nil
+	return nil
+}
+
+// fetchInMemory retrieves a height-based range that isn't sealed to disk yet
+// from the running block-dn server's memory.
+func (v *verifier) fetchInMemory(route string, start int32) ([]byte, error) {
+	url := fmt.Sprintf("%s/%s/%d", v.serverURL, route, start)
+	resp, err := v.httpClient.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("error fetching unsealed range from "+
+			"%s (is the block-dn server running?): %w", url, err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading response of %s: %w",
+			url, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status %d from %s: %s",
+			resp.StatusCode, url, body)
+	}
+
+	return body, nil
+}
+
+// serverBaseURL derives the HTTP base URL of the running block-dn server
+// from its --listen-addr value. A wildcard or empty listen host (":8080",
+// "0.0.0.0:8080", "[::]:8080") can't be dialed, so it is replaced with the
+// loopback name, which reaches the server from within the same (docker)
+// network namespace.
+func serverBaseURL(listenAddr string) (string, error) {
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		return "", fmt.Errorf("invalid --listen-addr %s: %w",
+			listenAddr, err)
+	}
+
+	if ip := net.ParseIP(host); host == "" ||
+		(ip != nil && ip.IsUnspecified()) {
+
+		host = "localhost"
+	}
+
+	return "http://" + net.JoinHostPort(host, port), nil
 }
 
 // readFilterFile parses a sealed var-int prefixed filter file.
