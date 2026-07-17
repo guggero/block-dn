@@ -19,9 +19,10 @@ import (
 )
 
 const (
-	// memoryFilterHeadersRoute is the server's height-based HTTP route
-	// (see createRouter) that serves unsealed filter-header ranges from
-	// memory.
+	// memoryHeadersRoute and memoryFilterHeadersRoute are the server's
+	// height-based HTTP routes (see createRouter) that serve unsealed
+	// ranges from memory.
+	memoryHeadersRoute       = "headers"
 	memoryFilterHeadersRoute = "filter-headers"
 )
 
@@ -50,11 +51,11 @@ func newVerifyCommand(cc *mainCommand) *cobra.Command {
 			"genesis, backend anchors) and every sealed compact-" +
 			"filter file (BIP157 commitment chain closure " +
 			"against " +
-			"the filter-header files). Filter headers that " +
-			"aren't sealed to disk yet are fetched from the " +
-			"running block-dn server's memory, reached through " +
-			"the --listen-addr flag. Requires the same " +
-			"--base-dir, network and bitcoind flags as the " +
+			"the filter-header files). The unsealed tail range " +
+			"that only exists in the running block-dn server's " +
+			"memory (reached through the --listen-addr flag) is " +
+			"verified against the backend as well. Requires the " +
+			"same --base-dir, network and bitcoind flags as the " +
 			"server. SP tweak data files are not covered. After " +
 			"--fix, purge the CDN cache for the repaired URLs.",
 		RunE: func(_ *cobra.Command, _ []string) error {
@@ -77,6 +78,11 @@ type verifier struct {
 	headersPerFile int32
 	filtersPerFile int32
 	fix            bool
+
+	// reOrgSafeDepth mirrors the server's --reorg-safe-depth: heights
+	// above tip minus this depth may legitimately still change, so they
+	// are never anchored against the backend.
+	reOrgSafeDepth int32
 
 	// serverURL is the base URL of the running block-dn server, derived
 	// from --listen-addr. Ranges that aren't sealed to disk yet only
@@ -122,6 +128,7 @@ func runVerify(cc *mainCommand, fix bool) error {
 		headersPerFile: headersPerFile,
 		filtersPerFile: filtersPerFile,
 		fix:            fix,
+		reOrgSafeDepth: int32(cc.reOrgSafeDepth),
 		serverURL:      serverURL,
 		httpClient: &http.Client{
 			Timeout: memoryFetchTimeout,
@@ -161,7 +168,8 @@ func runVerify(cc *mainCommand, fix bool) error {
 // the prev-hash linkage within and across files, the genesis block, and one
 // backend anchor per file end. The paired filter-header files are checked
 // for size and end anchor here; their interior is covered by the filter
-// chain closure in verifyFilterFiles.
+// chain closure in verifyFilterFiles. The unsealed tail range past the last
+// sealed file is verified against the running server's memory.
 func (v *verifier) verifyHeaderFiles() error {
 	headerDir := filepath.Join(v.baseDir, HeaderFileDir)
 
@@ -172,7 +180,9 @@ func (v *verifier) verifyHeaderFiles() error {
 			HeaderFileNamePattern, headerDir, start, end,
 		)
 		if !fileExists(name) {
-			return nil
+			// Everything past the sealed files only exists in
+			// the running server's memory.
+			return v.verifyMemoryTail(start, running)
 		}
 
 		err := v.verifyOneHeaderFile(name, start, end, &running)
@@ -318,6 +328,149 @@ func (v *verifier) verifyFilterHeaderAnchor(name string, start,
 		return fmt.Errorf("%s still corrupt after fix: %w", name, err)
 	}
 	fmt.Printf("filter headers %d-%d: fixed\n", start, end)
+
+	return nil
+}
+
+// verifyMemoryTail verifies the unsealed tail range that only exists in the
+// running server's memory: the block headers must continue the chain of the
+// last sealed file and anchor at the backend, and the filter headers must
+// anchor at the backend too. --fix can't repair this range — a divergence
+// means the server ingested a block that was later reorged away, and only a
+// restart (which re-indexes the unsealed range) heals its memory.
+func (v *verifier) verifyMemoryTail(start int32,
+	running chainhash.Hash) error {
+
+	headerData, err := v.fetchInMemory(memoryHeadersRoute, start)
+	if err != nil {
+		return err
+	}
+	if len(headerData) == 0 ||
+		len(headerData)%wire.MaxBlockHeaderPayload != 0 {
+
+		return fmt.Errorf("in-memory headers response has invalid "+
+			"length %d", len(headerData))
+	}
+	end := start + int32(len(headerData)/wire.MaxBlockHeaderPayload) - 1
+
+	numBad := len(v.badFiles)
+	err = v.checkMemoryHeaders(headerData, start, end, running)
+	if err != nil {
+		fmt.Printf("in-memory headers %d-%d: BAD (%v)\n", start, end,
+			err)
+		v.badFiles = append(v.badFiles, fmt.Sprintf(
+			"in-memory headers %d-%d", start, end,
+		))
+	} else {
+		fmt.Printf("in-memory headers %d-%d: OK\n", start, end)
+	}
+
+	fhData, err := v.fetchInMemory(memoryFilterHeadersRoute, start)
+	if err != nil {
+		return err
+	}
+	if len(fhData) == 0 || len(fhData)%chainhash.HashSize != 0 {
+		return fmt.Errorf("in-memory filter headers response has "+
+			"invalid length %d", len(fhData))
+	}
+	fhEnd := start + int32(len(fhData)/chainhash.HashSize) - 1
+
+	err = v.checkMemoryFilterHeaders(fhData, start, fhEnd)
+	if err != nil {
+		fmt.Printf("in-memory filter headers %d-%d: BAD (%v)\n",
+			start, fhEnd, err)
+		v.badFiles = append(v.badFiles, fmt.Sprintf(
+			"in-memory filter headers %d-%d", start, fhEnd,
+		))
+	} else {
+		fmt.Printf("in-memory filter headers %d-%d: OK\n", start,
+			fhEnd)
+	}
+
+	if v.fix && len(v.badFiles) > numBad {
+		fmt.Println("in-memory data can't be fixed; restart the " +
+			"block-dn server to re-index the unsealed range")
+	}
+
+	return nil
+}
+
+// checkMemoryHeaders verifies that the in-memory tail headers continue the
+// chain of the last sealed file (or start at genesis) and anchors the
+// highest reorg-safe height at the backend. The topmost reOrgSafeDepth
+// headers stay unanchored on purpose: they may legitimately still be
+// reorged away, and a spurious mismatch would read like corruption.
+func (v *verifier) checkMemoryHeaders(data []byte, start, end int32,
+	running chainhash.Hash) error {
+
+	var (
+		anchorHeight = end - v.reOrgSafeDepth
+		anchorHash   chainhash.Hash
+	)
+
+	prev := running
+	for height := start; height <= end; height++ {
+		offset := int(height-start) * wire.MaxBlockHeaderPayload
+		record := data[offset : offset+wire.MaxBlockHeaderPayload]
+
+		hash := chainhash.DoubleHashH(record)
+		if height == 0 {
+			if hash != *v.params.GenesisHash {
+				return fmt.Errorf("wrong genesis block")
+			}
+		} else if !bytes.Equal(record[4:36], prev[:]) {
+			return fmt.Errorf("header at height %d does not "+
+				"link to its predecessor", height)
+		}
+		prev = hash
+
+		if height == anchorHeight {
+			anchorHash = hash
+		}
+	}
+
+	if anchorHeight < start {
+		return nil
+	}
+
+	anchor, err := v.chain.GetBlockHash(int64(anchorHeight))
+	if err != nil {
+		return fmt.Errorf("error getting anchor: %w", err)
+	}
+	if anchorHash != *anchor {
+		return fmt.Errorf("header at height %d (%s) does not match "+
+			"the backend's block (%s)", anchorHeight, anchorHash,
+			anchor)
+	}
+
+	return nil
+}
+
+// checkMemoryFilterHeaders anchors the in-memory tail filter headers at the
+// backend at the highest reorg-safe height. Because a filter header commits
+// to all filters before it, a single anchor proves the whole chain below
+// it; the sealed filter files of the tail range additionally chain-close
+// against the individual values in verifyFilterFiles.
+func (v *verifier) checkMemoryFilterHeaders(data []byte, start,
+	end int32) error {
+
+	anchorHeight := end - v.reOrgSafeDepth
+	if anchorHeight < start {
+		return nil
+	}
+
+	authority, err := v.authFilterHeader(anchorHeight)
+	if err != nil {
+		return err
+	}
+
+	var stored chainhash.Hash
+	offset := int(anchorHeight-start) * chainhash.HashSize
+	copy(stored[:], data[offset:])
+	if stored != authority {
+		return fmt.Errorf("filter header at height %d does not "+
+			"match the backend", anchorHeight)
+	}
 
 	return nil
 }

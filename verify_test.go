@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/btcsuite/btcd/chaincfg/v2"
 	"github.com/btcsuite/btcd/chainhash/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/stretchr/testify/require"
@@ -281,4 +283,59 @@ func TestServerBaseURL(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, tc.want, got)
 	}
+}
+
+// TestCheckMemoryHeaders checks the linkage and genesis validation of the
+// in-memory tail headers. The backend anchor is skipped here by using a
+// depth larger than the tail; it is covered by the integration test.
+func TestCheckMemoryHeaders(t *testing.T) {
+	v := &verifier{
+		params:         &chaincfg.RegressionNetParams,
+		reOrgSafeDepth: 100,
+	}
+
+	// Fake 80-byte header records: only the prev-hash field (bytes 4-36)
+	// matters for the linkage check.
+	makeRecord := func(i byte, prev chainhash.Hash) []byte {
+		record := make([]byte, wire.MaxBlockHeaderPayload)
+		record[0] = i
+		copy(record[4:36], prev[:])
+		return record
+	}
+
+	var running chainhash.Hash
+	running[0] = 0xaa
+
+	var data []byte
+	prev := running
+	for i := range 3 {
+		record := makeRecord(byte(i), prev)
+		prev = chainhash.DoubleHashH(record)
+		data = append(data, record...)
+	}
+
+	require.NoError(t, v.checkMemoryHeaders(data, 7, 9, running))
+
+	// A record that doesn't link to its predecessor is caught.
+	data[wire.MaxBlockHeaderPayload+4] ^= 0x01
+	require.ErrorContains(
+		t, v.checkMemoryHeaders(data, 7, 9, running), "does not link",
+	)
+
+	// A tail that starts at height 0 must begin with the genesis block.
+	var genesisBuf bytes.Buffer
+	require.NoError(
+		t, v.params.GenesisBlock.Header.Serialize(&genesisBuf),
+	)
+	second := makeRecord(1, *v.params.GenesisHash)
+	data = append(genesisBuf.Bytes(), second...)
+	require.NoError(t, v.checkMemoryHeaders(
+		data, 0, 1, chainhash.Hash{},
+	))
+
+	// Anything else at height 0 is rejected.
+	data = append(makeRecord(0, chainhash.Hash{}), second...)
+	require.ErrorContains(t, v.checkMemoryHeaders(
+		data, 0, 1, chainhash.Hash{},
+	), "genesis")
 }
