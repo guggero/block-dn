@@ -2,8 +2,11 @@ package main
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/btcsuite/btcd/chainhash/v2"
@@ -132,25 +135,150 @@ func TestReadFilterFile(t *testing.T) {
 	require.Error(t, err)
 }
 
+// filterHeaderChain recomputes the BIP157 commitment chain over the given
+// filters, returning the filter header after the last one.
+func filterHeaderChain(filters [][]byte) chainhash.Hash {
+	var prev chainhash.Hash
+	for _, filter := range filters {
+		filterHash := chainhash.DoubleHashH(filter)
+		prev = chainhash.DoubleHashH(
+			append(filterHash[:], prev[:]...),
+		)
+	}
+
+	return prev
+}
+
 // TestStoredFilterHeader checks the height-to-file offset lookup, including
 // the out-of-range case.
 func TestStoredFilterHeader(t *testing.T) {
 	const perFile, numFilters = 3, 6
 	v, filters := buildFilterFixture(t, perFile, numFilters)
 
-	// Recompute the expected chain value at height 4.
-	var prev chainhash.Hash
-	for i := range 5 {
-		filterHash := chainhash.DoubleHashH(filters[i])
-		prev = chainhash.DoubleHashH(
-			append(filterHash[:], prev[:]...),
-		)
-	}
-
 	stored, err := v.storedFilterHeader(4)
 	require.NoError(t, err)
-	require.Equal(t, prev, stored)
+	require.Equal(t, filterHeaderChain(filters[:5]), stored)
+
+	// A height beyond the sealed range triggers an in-memory fetch; with
+	// the server responding like the real one does for a start height
+	// beyond its tip, the lookup must fail cleanly.
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte("start height is greater " +
+				"than current height"))
+		},
+	))
+	t.Cleanup(srv.Close)
+	v.serverURL = srv.URL
+	v.httpClient = srv.Client()
 
 	_, err = v.storedFilterHeader(int32(numFilters) + 3)
-	require.Error(t, err)
+	require.ErrorContains(t, err, "unexpected status")
+}
+
+// TestStoredFilterHeaderMemory checks that filter headers of a range that
+// has no sealed filter-header file on disk are fetched from the running
+// server's memory, including the snapshot refresh when the verification walk
+// outgrows a previously fetched snapshot.
+func TestStoredFilterHeaderMemory(t *testing.T) {
+	const perFile, numFilters = 2, 6
+	v, filters := buildFilterFixture(t, perFile, numFilters)
+
+	// Move the filter headers from disk into a fake block-dn server, so
+	// they're only reachable over HTTP, like the unsealed tail range of
+	// a running server.
+	headerDir := filepath.Join(v.baseDir, HeaderFileDir)
+	fhName := fmt.Sprintf(
+		FilterHeaderFileNamePattern, headerDir, 0, numFilters-1,
+	)
+	fHeaders, err := os.ReadFile(fhName)
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(fhName))
+
+	// The first snapshot ends below the later requested heights, like a
+	// server that hasn't indexed them yet; every following fetch returns
+	// the full range (or a short one again, once alwaysShort is set).
+	var (
+		calls       atomic.Int32
+		alwaysShort atomic.Bool
+	)
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/filter-headers/0" {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+
+			if calls.Add(1) == 1 || alwaysShort.Load() {
+				_, _ = w.Write(
+					fHeaders[:2*chainhash.HashSize],
+				)
+				return
+			}
+			_, _ = w.Write(fHeaders)
+		},
+	))
+	t.Cleanup(srv.Close)
+	v.serverURL = srv.URL
+	v.httpClient = srv.Client()
+
+	// Height 1 is covered by the first, short snapshot.
+	stored, err := v.storedFilterHeader(1)
+	require.NoError(t, err)
+	require.Equal(t, filterHeaderChain(filters[:2]), stored)
+
+	// Height 4 is beyond it, so the snapshot must be refreshed.
+	stored, err = v.storedFilterHeader(4)
+	require.NoError(t, err)
+	require.Equal(t, filterHeaderChain(filters[:5]), stored)
+	require.EqualValues(t, 2, calls.Load())
+
+	// The filter chain closure works against the memory-sourced filter
+	// headers as well.
+	filterDir := filepath.Join(v.baseDir, FilterFileDir)
+	name := fmt.Sprintf(FilterFileNamePattern, filterDir, 2, 3)
+	fileFilters, err := v.readFilterFile(name)
+	require.NoError(t, err)
+	require.NoError(t, v.checkFilterChain(fileFilters, 2, 3))
+
+	// A height the server doesn't cover even after a refresh is reported
+	// as truncated data.
+	alwaysShort.Store(true)
+	v.fHeaderCacheStart = -1
+	_, err = v.storedFilterHeader(4)
+	require.ErrorContains(t, err, "truncated")
+}
+
+// TestServerBaseURL checks the --listen-addr to base-URL derivation,
+// especially the wildcard listen hosts that can't be dialed directly.
+func TestServerBaseURL(t *testing.T) {
+	cases := []struct {
+		listenAddr string
+		want       string
+		wantErr    bool
+	}{
+		{listenAddr: "localhost:8080", want: "http://localhost:8080"},
+		{listenAddr: "block-dn:8080", want: "http://block-dn:8080"},
+		{listenAddr: "127.0.0.1:8334", want: "http://127.0.0.1:8334"},
+		{listenAddr: "0.0.0.0:8080", want: "http://localhost:8080"},
+		{listenAddr: ":8080", want: "http://localhost:8080"},
+		{listenAddr: "[::]:8080", want: "http://localhost:8080"},
+		{
+			listenAddr: "[2001:db8::1]:8080",
+			want:       "http://[2001:db8::1]:8080",
+		},
+		{listenAddr: "no-port", wantErr: true},
+	}
+
+	for _, tc := range cases {
+		got, err := serverBaseURL(tc.listenAddr)
+		if tc.wantErr {
+			require.Error(t, err)
+			continue
+		}
+
+		require.NoError(t, err)
+		require.Equal(t, tc.want, got)
+	}
 }
