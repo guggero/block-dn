@@ -624,7 +624,13 @@ func (v *verifier) diagnoseRange(filters [][]byte, start, end int32) (bool,
 		if err != nil {
 			return false, false, err
 		}
-		if !bytes.Equal(filters[height-start], authFilter) {
+
+		// An unparseable filters file yields no entries to compare
+		// against; it (like any file shorter than its range) is the
+		// culprit by definition.
+		if int(height-start) >= len(filters) ||
+			!bytes.Equal(filters[height-start], authFilter) {
+
 			fmt.Printf("  filter at height %d diverges from "+
 				"the backend\n", height)
 			badFilters = true
