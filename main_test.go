@@ -48,6 +48,7 @@ const (
 	headerSize        = 80
 	filterHeadersSize = 32
 
+	cacheNone      = "no-cache"
 	cacheTemporary = "public, max-age=1"
 	cacheMemory    = "public, max-age=60"
 	cacheDisk      = "public, max-age=31536000, " +
@@ -251,6 +252,10 @@ var testCases = []struct {
 		fn:   testSPTweakData,
 	},
 	{
+		name: "header",
+		fn:   testSingleHeader,
+	},
+	{
 		name: "block",
 		fn:   testBlock,
 	},
@@ -293,6 +298,10 @@ func testErrors(t *testing.T, ctx *testContext) {
 	var (
 		badHash  = strings.Repeat("k", 64)
 		badInt64 = strings.Repeat("9", 20)
+
+		// unknownHash is a well-formed block hash that doesn't exist
+		// on the chain, so the backend rejects the lookup.
+		unknownHash = strings.Repeat("ab", 32)
 
 		// badStartHeight is too high for the start-height endpoints
 		// (checkStartHeight rejects > currentHeight).
@@ -340,6 +349,10 @@ func testErrors(t *testing.T, ctx *testContext) {
 		respBadHashLength = errorResponse{
 			status: 400,
 			error:  errInvalidHashLength.Error(),
+		}
+		respBlockNotFound = errorResponse{
+			status: 500,
+			error:  "Block not found",
 		}
 		respNotFound = errorResponse{
 			status: 404,
@@ -392,6 +405,10 @@ func testErrors(t *testing.T, ctx *testContext) {
 		"block":                                 respNotFound,
 		"block/aaaa":                            respBadHashLength,
 		"block/" + badHash:                      respNotFound,
+		"header":                                respNotFound,
+		"header/aaaa":                           respBadHashLength,
+		"header/" + badHash:                     respNotFound,
+		"header/" + unknownHash:                 respBlockNotFound,
 		"tx/out-proof":                          respNotFound,
 		"tx/out-proof/aaaa":                     respBadHashLength,
 		"tx/out-proof/" + badHash:               respNotFound,
@@ -420,8 +437,16 @@ func testErrors(t *testing.T, ctx *testContext) {
 			t, "*", headers.Get(HeaderCORS), "endpoint: %s",
 			endpoint,
 		)
+
+		// Client errors are cached briefly, since the same request
+		// will keep failing. Server errors may be transient, so
+		// they're not cached at all.
+		expectedCache := cacheMemory
+		if expected.status >= http.StatusInternalServerError {
+			expectedCache = cacheNone
+		}
 		require.Equalf(
-			t, cacheMemory, headers.Get(HeaderCache),
+			t, expectedCache, headers.Get(HeaderCache),
 			"endpoint: %s", endpoint,
 		)
 	}
@@ -985,6 +1010,65 @@ func parseSPTweakResponse(t *testing.T, body []byte, expStartHeight int64,
 	}
 
 	return blocks
+}
+
+// testSingleHeader exercises the /header/<hash> endpoint, which serves the
+// raw 80-byte header of a single block, addressed by its hash.
+func testSingleHeader(t *testing.T, ctx *testContext) {
+	// We start with the latest block, whose header must be served exactly
+	// as the backend reports it.
+	_, bestHash := ctx.bestBlock(t)
+	expected, err := ctx.backend.GetBlockHeader(&bestHash)
+	require.NoError(t, err)
+
+	var expectedBytes bytes.Buffer
+	require.NoError(t, expected.Serialize(&expectedBytes))
+
+	tipData, headers := ctx.fetchBinary(
+		t, fmt.Sprintf("header/%s", bestHash.String()),
+	)
+	require.Len(t, tipData, headerSize)
+	require.Equal(t, expectedBytes.Bytes(), tipData)
+
+	// The header of a given block hash can never change, so the response
+	// is cached at the disk tier, even though it's served from the
+	// backend and not from a file.
+	require.Contains(t, headers, HeaderCache)
+	require.Equal(t, cacheDisk, headers.Get(HeaderCache))
+	require.Equal(t, "*", headers.Get(HeaderCORS))
+
+	// The served bytes must deserialize into the header of exactly the
+	// block we asked for.
+	var tipHeader wire.BlockHeader
+	require.NoError(t, tipHeader.Deserialize(bytes.NewReader(tipData)))
+	require.Equal(t, bestHash, tipHeader.BlockHash())
+
+	// Requesting a different block must return that block's header, so a
+	// handler ignoring the hash and always serving the tip would fail
+	// here. The genesis block is the most distinctive one to compare
+	// against: its header is the only one with an all-zero previous block
+	// hash.
+	genesisHash := testParams.GenesisHash
+	genesisData, headers := ctx.fetchBinary(
+		t, fmt.Sprintf("header/%s", genesisHash.String()),
+	)
+	require.Len(t, genesisData, headerSize)
+	require.NotEqual(t, tipData, genesisData)
+	require.Equal(t, cacheDisk, headers.Get(HeaderCache))
+
+	var genesisHeader wire.BlockHeader
+	require.NoError(
+		t, genesisHeader.Deserialize(bytes.NewReader(genesisData)),
+	)
+	require.Equal(t, *genesisHash, genesisHeader.BlockHash())
+	require.Equal(t, chainhash.Hash{}, genesisHeader.PrevBlock)
+
+	// Finally, the single header must be byte-identical to the same
+	// header served by the height-based batch endpoint, which is backed
+	// by the files on disk instead of the backend.
+	batch, _ := ctx.fetchBinary(t, "headers/0")
+	require.GreaterOrEqual(t, len(batch), headerSize)
+	require.Equal(t, batch[:headerSize], genesisData)
 }
 
 func testBlock(t *testing.T, ctx *testContext) {
