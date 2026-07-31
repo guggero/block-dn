@@ -146,6 +146,12 @@ func (s *server) createRouter() *mux.Router {
 	router.HandleFunc("/", s.indexRequestHandler)
 	router.HandleFunc("/index.html", s.indexRequestHandler)
 	router.HandleFunc("/status", s.statusRequestHandler)
+	router.HandleFunc("/block/{hash:[0-9a-f]+}", s.blockRequestHandler)
+	router.HandleFunc(
+		"/block/{hash:[0-9a-f]+}/spenttxouts",
+		s.blockSpentTxOutsRequestHandler,
+	)
+	router.HandleFunc("/header/{hash:[0-9a-f]+}", s.headerRequestHandler)
 	router.HandleFunc("/headers/{height:[0-9]+}", s.headersRequestHandler)
 	router.HandleFunc(
 		"/headers/import/latest",
@@ -154,6 +160,9 @@ func (s *server) createRouter() *mux.Router {
 	router.HandleFunc(
 		"/headers/import/{height:[0-9]+}",
 		s.headersImportRequestHandler,
+	)
+	router.HandleFunc(
+		"/fees/estimate/{blocks:[0-9]+}", s.estimateFeeRequestHandler,
 	)
 	router.HandleFunc(
 		"/filter-headers/{height:[0-9]+}",
@@ -184,11 +193,6 @@ func (s *server) createRouter() *mux.Router {
 		"/sp/tweaks/{dust:[0-9]+}/{height:[0-9]+}",
 		s.spTweaksRequestHandler,
 	)
-	router.HandleFunc("/block/{hash:[0-9a-f]+}", s.blockRequestHandler)
-	router.HandleFunc(
-		"/block/{hash:[0-9a-f]+}/spenttxouts",
-		s.blockSpentTxOutsRequestHandler,
-	)
 	router.HandleFunc(
 		"/tx/out-proof/{txid:[0-9a-f]+}", s.txOutProofRequestHandler,
 	)
@@ -197,9 +201,6 @@ func (s *server) createRouter() *mux.Router {
 	)
 	router.HandleFunc(
 		"/utxo/{txid:[0-9a-f]+}-{vout:[0-9]+}", s.utxoRequestHandler,
-	)
-	router.HandleFunc(
-		"/fees/estimate/{blocks:[0-9]+}", s.estimateFeeRequestHandler,
 	)
 
 	return router
@@ -907,6 +908,23 @@ func (s *server) blockSpentTxOutsRequestHandler(w http.ResponseWriter,
 	}
 
 	sendJsonCopy(w, resp.Body, maxAgeDisk)
+}
+
+func (s *server) headerRequestHandler(w http.ResponseWriter, r *http.Request) {
+	blockHash, err := parseRequestParamChainHash(r, "hash")
+	if err != nil {
+		sendError(w, status400, fmt.Errorf("%w: %w",
+			errInvalidBlockHash, err))
+		return
+	}
+
+	header, err := s.chain.GetBlockHeader(blockHash)
+	if err != nil {
+		sendError(w, status500, err)
+		return
+	}
+
+	sendBinary(w, header, maxAgeDisk)
 }
 
 func (s *server) txOutProofRequestHandler(w http.ResponseWriter,
