@@ -29,7 +29,9 @@ const (
 	scriptTypeP2TR
 )
 
-// customFilterConfig describes one output-type-restricted filter set.
+// customFilterConfig describes one custom filter set: either restricted to
+// output scripts of certain types, or carrying the data of OP_RETURN
+// outputs.
 type customFilterConfig struct {
 	// name identifies the set and is used in the on-disk directory
 	// names (filters/custom-<name> and headers/custom-<name>).
@@ -38,6 +40,28 @@ type customFilterConfig struct {
 	// types is the set of output script types whose scripts are
 	// included in this filter.
 	types scriptTypes
+
+	// opReturn marks this configuration as an OP_RETURN data filter:
+	// its elements are chunks of the pushed data of the block's
+	// OP_RETURN outputs (see opReturnData) instead of output scripts.
+	// Since OP_RETURN outputs are unspendable, they can never appear on
+	// the input side, so only the block's own outputs contribute
+	// elements.
+	opReturn bool
+
+	// chunkLen is the size of one OP_RETURN data element in bytes: the
+	// output's data is split into consecutive chunkLen-byte chunks from
+	// offset zero, and every complete chunk becomes an element (a
+	// trailing partial chunk contributes nothing). Since GCS filters can
+	// only ever match complete elements, aligned chunks are what lets a
+	// client match on a marker or tag anywhere in the indexed window
+	// without knowing the rest of the payload.
+	chunkLen int
+
+	// maxChunks caps the number of chunks per output, bounding both the
+	// filter growth per output and the indexed window
+	// (chunkLen*maxChunks bytes).
+	maxChunks int
 }
 
 // customFilterConfigs are the filter sets the custom filter producer builds
@@ -62,6 +86,12 @@ var customFilterConfigs = []customFilterConfig{
 	{
 		name:  "p2tr",
 		types: scriptTypeP2TR,
+	},
+	{
+		name:      "opreturn-4x16",
+		opReturn:  true,
+		chunkLen:  4,
+		maxChunks: 16,
 	},
 }
 
@@ -107,14 +137,44 @@ func classifyScript(pkScript []byte) scriptTypes {
 	}
 }
 
-// buildCustomFilters builds one output-type-restricted filter per
-// configuration from a single pass over the given block. The filters use the
-// exact same parameters as bitcoind's BIP-0158 basic filters (P=19,
-// M=784931, SipHash key derived from the block hash, elements de-duplicated
-// by script); they only differ in which elements are included: the output
-// scripts of matching types created by the block, plus the previous output
-// scripts of matching types spent by it. The type restriction subsumes the
-// basic filter's exclusion of empty and OP_RETURN scripts.
+// opReturnData returns the data carried by an OP_RETURN output script: the
+// concatenation of all its data pushes, in script order. It returns nil for
+// scripts that are not OP_RETURN outputs, carry no data, or fail to parse
+// (which a consensus-valid OP_RETURN script can, since anything may follow
+// the opcode) — such outputs contribute no filter elements.
+func opReturnData(pkScript []byte) []byte {
+	if len(pkScript) == 0 || pkScript[0] != txscript.OP_RETURN {
+		return nil
+	}
+
+	pushes, err := txscript.PushedData(pkScript[1:])
+	if err != nil {
+		return nil
+	}
+
+	var data []byte
+	for _, push := range pushes {
+		data = append(data, push...)
+	}
+
+	return data
+}
+
+// buildCustomFilters builds one custom filter per configuration from a
+// single pass over the given block. The filters use the exact same
+// parameters as bitcoind's BIP-0158 basic filters (P=19, M=784931, SipHash
+// key derived from the block hash, elements de-duplicated); they only
+// differ in which elements are included:
+//
+//   - Output-type-restricted sets carry the output scripts of matching
+//     types created by the block, plus the previous output scripts of
+//     matching types spent by it. The type restriction subsumes the basic
+//     filter's exclusion of empty and OP_RETURN scripts.
+//   - OP_RETURN data sets carry the complete chunkLen-byte chunks of the
+//     pushed data of the block's OP_RETURN outputs (up to maxChunks per
+//     output), letting clients match on an aligned marker or tag anywhere
+//     in the indexed window. Only outputs contribute: OP_RETURN outputs
+//     are unspendable and never appear as previous outputs.
 func buildCustomFilters(hash *chainhash.Hash,
 	block *blockWithPrevOuts) ([]*gcs.Filter, error) {
 
@@ -130,8 +190,31 @@ func buildCustomFilters(hash *chainhash.Hash,
 		}
 
 		for i := range customFilterConfigs {
-			if customFilterConfigs[i].types&types != 0 {
+			cfg := &customFilterConfigs[i]
+			if !cfg.opReturn && cfg.types&types != 0 {
 				builders[i].AddEntry(pkScript)
+			}
+		}
+	}
+
+	addOpReturnData := func(pkScript []byte) {
+		data := opReturnData(pkScript)
+		if len(data) == 0 {
+			return
+		}
+
+		for i := range customFilterConfigs {
+			cfg := &customFilterConfigs[i]
+			if !cfg.opReturn {
+				continue
+			}
+
+			chunkLen := cfg.chunkLen
+			numChunks := min(len(data)/chunkLen, cfg.maxChunks)
+			for c := range numChunks {
+				builders[i].AddEntry(
+					data[c*chunkLen : (c+1)*chunkLen],
+				)
 			}
 		}
 	}
@@ -139,6 +222,7 @@ func buildCustomFilters(hash *chainhash.Hash,
 	for _, tx := range block.txs {
 		for _, txOut := range tx.TxOut {
 			addScript(txOut.PkScript)
+			addOpReturnData(txOut.PkScript)
 		}
 	}
 	for _, pkScript := range block.prevOutScripts {
