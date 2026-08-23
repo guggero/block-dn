@@ -283,10 +283,11 @@
                 </td>
                 <td>
                     Returns a binary file containing 100'000 compact filter
-                    headers of one of the output-type-restricted filter sets
-                    (<code>segwit</code> [combination of all three following
-                    types], <code>p2wpkh</code>,
-                    <code>p2wsh</code> or <code>p2tr</code>), serialized the
+                    headers of one of the custom filter sets
+                    (<code>segwit</code>, <code>p2wpkh</code>,
+                    <code>p2wsh</code>, <code>p2tr</code> or
+                    <code>opreturn-4x16</code>; see
+                    <code>/filters/type/...</code> below), serialized the
                     same way as <code>/filter-headers</code>. Only available
                     if the server indexes custom filters.
                 </td>
@@ -335,15 +336,38 @@
                 </td>
                 <td>
                     Returns a binary file containing 2'000 compact filters of
-                    one of the output-type-restricted filter sets
-                    (<code>segwit</code> [combination of all three following
-                    types], <code>p2wpkh</code>,
-                    <code>p2wsh</code> or <code>p2tr</code>), serialized the
-                    same way as <code>/filters</code>. These filters use the
-                    same parameters as the BIP-0158 basic filters but only
-                    include output scripts of the given types, making them
-                    significantly smaller. Only available if the server
-                    indexes custom filters.
+                    one of the custom filter sets, serialized the same way as
+                    <code>/filters</code>. All sets use the same parameters
+                    (and SipHash key derived from the block hash) as the
+                    BIP-0158 basic filters; they only differ in their
+                    elements.
+                    <br/><br/>
+                    The output-type-restricted sets (<code>segwit</code>
+                    [combination of all three following types],
+                    <code>p2wpkh</code>, <code>p2wsh</code> and
+                    <code>p2tr</code>) contain only the output scripts of the
+                    given types, from both the outputs a block creates and
+                    the previous outputs it spends, making them significantly
+                    smaller than the basic filters.
+                    <br/><br/>
+                    The OP_RETURN data set (<code>opreturn-4x16</code>)
+                    contains chunks of the data carried by the block's
+                    OP_RETURN outputs. Per output, the data is the
+                    concatenation of the script's data pushes; its elements
+                    are the complete, aligned 4-byte chunks
+                    <code>data[4i..4i+4)</code> for <code>i = 0..15</code>
+                    (so at most 16 chunks, covering the first 64 bytes; a
+                    trailing partial chunk contributes nothing). Since
+                    compact filters can only ever match complete elements,
+                    aligned chunks are what lets a client match on a 4-byte
+                    marker or tag <em>anywhere</em> in the indexed window
+                    without knowing the rest of the payload; longer tags are
+                    matched as consecutive chunks. Only a block's own outputs
+                    contribute (OP_RETURN outputs are unspendable and never
+                    appear on the input side), and coinbase OP_RETURN
+                    outputs (e.g. the segwit witness commitment) are included
+                    like any other. Only available if the server indexes
+                    custom filters.
                 </td>
                 <td>
                     <a href="https://block-dn.org/filters/type/segwit/802000">

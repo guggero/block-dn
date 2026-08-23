@@ -12,6 +12,7 @@ import (
 	"github.com/btcsuite/btcd/btcutil/v2/gcs"
 	"github.com/btcsuite/btcd/btcutil/v2/gcs/builder"
 	"github.com/btcsuite/btcd/chainhash/v2"
+	"github.com/btcsuite/btcd/txscript/v2"
 	"github.com/btcsuite/btcd/wire/v2"
 	"github.com/stretchr/testify/require"
 )
@@ -41,7 +42,46 @@ var (
 		0x88, 0xac,
 	)
 	testScriptOpReturn = []byte{0x6a, 0x02, 0x05, 0x05}
+
+	// A 16-byte OP_RETURN payload with distinct bytes, so every 4-byte
+	// chunk produces a distinct filter element.
+	testOpReturnLongData = []byte{
+		0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+		0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+	}
+	testScriptOpReturnLong = append(
+		[]byte{0x6a, 0x10}, testOpReturnLongData...,
+	)
+
+	// An OP_RETURN script with two data pushes; its data is the
+	// concatenation of both pushes.
+	testScriptOpReturnMultiPush = []byte{
+		0x6a, 0x03, 0x08, 0x09, 0x0a, 0x02, 0x0b, 0x0c,
+	}
 )
+
+// TestOpReturnData pins the OP_RETURN data extraction the OP_RETURN filter
+// configurations are based on.
+func TestOpReturnData(t *testing.T) {
+	// A single data push yields its bytes.
+	require.Equal(t, []byte{0x05, 0x05}, opReturnData(testScriptOpReturn))
+
+	// Multiple data pushes are concatenated in script order.
+	require.Equal(
+		t, []byte{0x08, 0x09, 0x0a, 0x0b, 0x0c},
+		opReturnData(testScriptOpReturnMultiPush),
+	)
+
+	// Non-OP_RETURN scripts, bare OP_RETURN without data, OP_RETURN
+	// followed by non-push opcodes and unparseable pushes all yield no
+	// data.
+	require.Nil(t, opReturnData(testScriptP2TR))
+	require.Nil(t, opReturnData(testScriptP2PKH))
+	require.Nil(t, opReturnData(nil))
+	require.Nil(t, opReturnData([]byte{0x6a}))
+	require.Nil(t, opReturnData([]byte{0x6a, txscript.OP_DUP}))
+	require.Nil(t, opReturnData([]byte{0x6a, 0x05, 0x01})) // truncated
+}
 
 // TestClassifyScript pins the script type classification the custom filter
 // configurations are based on.
@@ -55,15 +95,19 @@ func TestClassifyScript(t *testing.T) {
 }
 
 // TestBuildCustomFilters checks that each configuration's filter contains
-// exactly the scripts of its configured types, from both the block's outputs
-// and its spent previous outputs, with duplicates removed.
+// exactly its expected elements: for the type-restricted sets the scripts
+// of the configured types (from both the block's outputs and its spent
+// previous outputs), for the OP_RETURN set the complete 4-byte chunks of
+// the block's OP_RETURN output data — with duplicates removed in both
+// cases.
 func TestBuildCustomFilters(t *testing.T) {
 	blockHash := chainhash.DoubleHashH([]byte("custom filter test block"))
 	key := builder.DeriveKey(&blockHash)
 
 	// One transaction creates a p2wpkh (twice, to check de-duplication),
-	// a p2pkh and an OP_RETURN output; its inputs spend a p2wsh and a
-	// p2pkh output. A p2tr script is only visible on the input side.
+	// a p2pkh and three OP_RETURN outputs (one of them twice, again for
+	// de-duplication); its inputs spend a p2wsh and a p2pkh output. A
+	// p2tr script is only visible on the input side.
 	tx := &wire.MsgTx{
 		TxIn: []*wire.TxIn{
 			{PreviousOutPoint: wire.OutPoint{Index: 0}},
@@ -75,6 +119,9 @@ func TestBuildCustomFilters(t *testing.T) {
 			{PkScript: testScriptP2WPKH},
 			{PkScript: testScriptP2PKH},
 			{PkScript: testScriptOpReturn},
+			{PkScript: testScriptOpReturn},
+			{PkScript: testScriptOpReturnLong},
+			{PkScript: testScriptOpReturnMultiPush},
 		},
 	}
 	block := &blockWithPrevOuts{
@@ -90,44 +137,65 @@ func TestBuildCustomFilters(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, filters, len(customFilterConfigs))
 
-	// expectedScripts maps the configuration name to the scripts its
-	// filter must (and must not) contain.
-	expectedScripts := map[string][][]byte{
+	shortData := []byte{0x05, 0x05}
+	multiPushData := []byte{0x08, 0x09, 0x0a, 0x0b, 0x0c}
+
+	// expectedElements maps the configuration name to the elements its
+	// filter must (and must not) contain: scripts for the type sets, and
+	// for the OP_RETURN set the complete 4-byte data chunks — the 2-byte
+	// data and the trailing byte of the 5-byte multi-push data contribute
+	// nothing.
+	expectedElements := map[string][][]byte{
 		"segwit": {
 			testScriptP2WPKH, testScriptP2WSH, testScriptP2TR,
 		},
 		"p2wpkh": {testScriptP2WPKH},
 		"p2wsh":  {testScriptP2WSH},
 		"p2tr":   {testScriptP2TR},
+		"opreturn-4x16": {
+			testOpReturnLongData[0:4], testOpReturnLongData[4:8],
+			testOpReturnLongData[8:12], testOpReturnLongData[12:16],
+			multiPushData[:4],
+		},
 	}
-	allScripts := [][]byte{
+
+	// The probe universe: everything any filter may contain, plus
+	// negatives (the p2pkh script, whole OP_RETURN scripts, data too
+	// short to form a chunk and unaligned or wrongly-sized windows).
+	probes := [][]byte{
 		testScriptP2WPKH, testScriptP2WSH, testScriptP2TR,
-		testScriptP2PKH, testScriptOpReturn,
+		testScriptP2PKH, testScriptOpReturn, testScriptOpReturnLong,
+		testScriptOpReturnMultiPush,
+		shortData, multiPushData, multiPushData[:4],
+		testOpReturnLongData, testOpReturnLongData[0:4],
+		testOpReturnLongData[4:8], testOpReturnLongData[8:12],
+		testOpReturnLongData[12:16], testOpReturnLongData[:8],
+		testOpReturnLongData[2:6],
 	}
 
 	for i, cfg := range customFilterConfigs {
-		expected := expectedScripts[cfg.name]
+		expected := expectedElements[cfg.name]
 
-		// The duplicate p2wpkh output must only count once, so the
-		// number of filter elements is the number of expected
-		// scripts.
+		// The duplicate p2wpkh and OP_RETURN outputs must only count
+		// once, so the number of filter elements is the number of
+		// expected elements.
 		require.EqualValues(
 			t, len(expected), filters[i].N(), cfg.name,
 		)
 
-		for _, script := range allScripts {
-			match, err := filters[i].Match(key, script)
+		for _, probe := range probes {
+			match, err := filters[i].Match(key, probe)
 			require.NoError(t, err)
 
 			shouldMatch := false
 			for _, exp := range expected {
-				if bytes.Equal(exp, script) {
+				if bytes.Equal(exp, probe) {
 					shouldMatch = true
 				}
 			}
 			require.Equalf(
-				t, shouldMatch, match, "config %s, script %x",
-				cfg.name, script,
+				t, shouldMatch, match, "config %s, probe %x",
+				cfg.name, probe,
 			)
 		}
 	}
@@ -184,7 +252,10 @@ func TestCustomFilterFilesUpdate(t *testing.T) {
 	checkCustomFilterFiles(t, dataDir, 399, 299)
 
 	// Create one output of each custom filter type, plus a legacy p2pkh
-	// control output that must not appear in any custom filter.
+	// control output that must not appear in any custom filter, plus an
+	// OP_RETURN output whose data must appear in the OP_RETURN sets (but
+	// which is excluded from the basic filter, so it stays out of
+	// spendScripts).
 	spendScripts := [][]byte{
 		testScriptP2WPKH, testScriptP2WSH, testScriptP2TR,
 		testScriptP2PKH,
@@ -195,8 +266,14 @@ func TestCustomFilterFilesUpdate(t *testing.T) {
 			PkScript: pkScript,
 		}, 2)
 	}
+	miner.SendOutput(&wire.TxOut{
+		Value:    0,
+		PkScript: testScriptOpReturnLong,
+	}, 2)
 
-	minedBlocks := miner.MineBlocksAndAssertNumTxes(1, len(spendScripts))
+	minedBlocks := miner.MineBlocksAndAssertNumTxes(
+		1, len(spendScripts)+1,
+	)
 	spendHeight := int32(initialBlocks + 1)
 	waitBackendSync(t, backend, miner)
 	waitForTargetHeight(t, &wg, cf, spendHeight)
@@ -232,7 +309,33 @@ func TestCustomFilterFilesUpdate(t *testing.T) {
 		)
 		require.NoError(t, err)
 
+		// Type sets must match exactly the scripts of their types;
+		// OP_RETURN sets (types == 0) must match no script at all.
 		assertMatches(t, filter, cfg.types)
+
+		if !cfg.opReturn {
+			continue
+		}
+
+		// The OP_RETURN set must contain every complete 4-byte chunk
+		// of the block's OP_RETURN output data. No exact element
+		// count is asserted, since the coinbase may contribute
+		// OP_RETURN outputs of its own (e.g. the segwit witness
+		// commitment).
+		for c := 0; c+4 <= len(testOpReturnLongData); c += 4 {
+			chunk := testOpReturnLongData[c : c+4]
+			match, err := filter.Match(key, chunk)
+			require.NoError(t, err)
+			require.Truef(t, match, "config %s, chunk %x", cfg.name,
+				chunk)
+		}
+
+		// A chunk that never appeared must not match.
+		absent := bytes.Repeat([]byte{0xff}, 4)
+		match, err := filter.Match(key, absent)
+		require.NoError(t, err)
+		require.Falsef(t, match, "config %s, data %x", cfg.name,
+			absent)
 	}
 
 	// Cross-check against the backend: bitcoind's basic filter for the
