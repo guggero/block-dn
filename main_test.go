@@ -1314,8 +1314,9 @@ func newBitcoind(t *testing.T, logdir string,
 // sealed files served from disk, the unsealed tail served from memory and
 // the filter content of a block with known outputs.
 func testCustomFilters(t *testing.T, ctx *testContext) {
-	// Create one output of each custom filter type, so the tip block
-	// contains known scripts, then mine and wait for the files to sync.
+	// Create one output of each custom filter type plus an OP_RETURN
+	// output with known data, so the tip block contains known scripts,
+	// then mine and wait for the files to sync.
 	spendScripts := [][]byte{
 		testScriptP2WPKH, testScriptP2WSH, testScriptP2TR,
 	}
@@ -1325,8 +1326,12 @@ func testCustomFilters(t *testing.T, ctx *testContext) {
 			PkScript: pkScript,
 		}, 2)
 	}
+	ctx.miner.SendOutput(&wire.TxOut{
+		Value:    0,
+		PkScript: testScriptOpReturnLong,
+	}, 2)
 	minedBlocks := ctx.miner.MineBlocksAndAssertNumTxes(
-		1, len(spendScripts),
+		1, len(spendScripts)+1,
 	)
 	ctx.waitBackendSync(t)
 	ctx.waitFilesSync(t)
@@ -1356,7 +1361,8 @@ func testCustomFilters(t *testing.T, ctx *testContext) {
 		require.Equal(t, "*", headers.Get(HeaderCORS))
 
 		// The tip block's filter must match exactly the scripts of
-		// the set's types.
+		// the set's types; OP_RETURN sets (types == 0) match no
+		// script at all.
 		tipFilter, err := gcs.FromNBytes(
 			builder.DefaultP, builder.DefaultM, tail[len(tail)-1],
 		)
@@ -1371,6 +1377,28 @@ func testCustomFilters(t *testing.T, ctx *testContext) {
 				pkScript,
 			)
 		}
+
+		// The OP_RETURN set must contain every complete 4-byte chunk
+		// of the OP_RETURN output's data, but not an unrelated chunk.
+		if !cfg.opReturn {
+			continue
+		}
+		for c := 0; c+4 <= len(testOpReturnLongData); c += 4 {
+			chunk := testOpReturnLongData[c : c+4]
+			match, err := tipFilter.Match(key, chunk)
+			require.NoError(t, err)
+			require.Truef(
+				t, match, "filter %s, chunk %x", cfg.name,
+				chunk,
+			)
+		}
+
+		absent := bytes.Repeat([]byte{0xff}, 4)
+		match, err := tipFilter.Match(key, absent)
+		require.NoError(t, err)
+		require.Falsef(
+			t, match, "filter %s, data %x", cfg.name, absent,
+		)
 	}
 }
 

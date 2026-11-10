@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	version = "1.4.3"
+	version = "1.4.4"
 
 	defaultListenPort = 8080
 
@@ -224,11 +224,12 @@ func main() {
 	)
 	cc.cmd.PersistentFlags().BoolVar(
 		&cc.indexCustomFilters, "index-custom-filters", false,
-		"Indicates if the server should build custom "+
-			"output-type-restricted compact filters (four sets: "+
-			"segwit, p2wpkh, p2wsh, p2tr); adds about 8 GB more "+
-			"data as of block 950k; requires bitcoind v30.0 or "+
-			"later with the REST API enabled (rest=1)",
+		"Indicates if the server should build custom compact "+
+			"filters: four output-type-restricted sets (segwit, "+
+			"p2wpkh, p2wsh, p2tr) plus an OP_RETURN data chunk "+
+			"set (opreturn-4x16); adds about 8 GB more data as of "+
+			"block 950k; requires bitcoind v30.0 or later with "+
+			"the REST API enabled (rest=1)",
 	)
 	cc.cmd.PersistentFlags().Uint16Var(
 		&cc.prevOutCacheSizeMiB, "prev-out-cache-size-mib", 1024,
